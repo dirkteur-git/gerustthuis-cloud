@@ -1,0 +1,62 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  /* Primary brand colors */
+  --color-primary: #1B5E3B;
+  --color-primary-50: #E8F5EC;
+  --color-primary-100: #C6E7D0;
+  --color-primary-200: #9DD4B0;
+  --color-primary-300: #74C190;
+  --color-primary-400: #4BAE70;
+  --color-primary-500: #1B5E3B;
+  --color-primary-600: #185534;
+  --color-primary-700: #144A2D;
+  --color-primary-800: #113F26;
+  --color-primary-900: #0D341F;
+
+  /* Semantic colors */
+  --color-success: #22C55E;
+  --color-warning: #F59E0B;
+  --color-danger: #EF4444;
+  --color-error: #EF4444;
+
+  /* Background */
+  --color-background: #FAFAFA;
+  --color-surface: #FFFFFF;
+
+  /* Font */
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+@layer base {
+  body {
+    font-family: var(--font-sans);
+    @apply text-gray-900 antialiased;
+    background-color: var(--color-background);
+  }
+}
+
+@layer components {
+  .container {
+    @apply max-w-7xl mx-auto px-4 sm:px-6 lg:px-8;
+  }
+}
+
+@layer utilities {
+  .bg-primary {
+    background-color: var(--color-primary);
+  }
+
+  .text-primary {
+    color: var(--color-primary);
+  }
+
+  .bg-background {
+    background-color: var(--color-background);
+  }
+
+  .bg-surface {
+    background-color: var(--color-surface);
+  }
+}
