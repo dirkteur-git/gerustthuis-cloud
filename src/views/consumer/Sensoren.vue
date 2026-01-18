@@ -2,30 +2,79 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { supabase } from '@/services/supabase'
 import {
-  Radio,
-  Vibrate,
-  Wifi,
-  WifiOff,
-  ChevronRight,
+  Thermometer,
+  Eye,
+  DoorOpen,
   RefreshCw,
   Activity,
   ArrowLeft,
-  BarChart3
+  BarChart3,
+  Clock,
+  MapPin
 } from 'lucide-vue-next'
 
-const sensors = ref([])
-const readings = ref([])
+const sensorReadings = ref([])
+const motionEvents = ref([])
 const loading = ref(true)
 const lastUpdate = ref(null)
-const selectedSensor = ref(null)
+const selectedRoom = ref(null)
 
-// Chart data
+// Rooms with their latest data
+const rooms = computed(() => {
+  const roomMap = new Map()
+
+  // Process temperature readings
+  for (const reading of sensorReadings.value) {
+    if (!roomMap.has(reading.room)) {
+      roomMap.set(reading.room, {
+        name: reading.room,
+        temperature: null,
+        lastMotion: null,
+        motionCount: 0,
+        isActive: false
+      })
+    }
+    const room = roomMap.get(reading.room)
+    if (reading.sensor_type === 'temperature' && (!room.temperature || new Date(reading.recorded_at) > new Date(room.temperatureTime))) {
+      room.temperature = reading.value
+      room.temperatureTime = reading.recorded_at
+    }
+  }
+
+  // Process motion events
+  for (const event of motionEvents.value) {
+    if (!roomMap.has(event.room)) {
+      roomMap.set(event.room, {
+        name: event.room,
+        temperature: null,
+        lastMotion: null,
+        motionCount: 0,
+        isActive: false
+      })
+    }
+    const room = roomMap.get(event.room)
+    if (event.motion) {
+      room.motionCount++
+      if (!room.lastMotion || new Date(event.recorded_at) > new Date(room.lastMotion)) {
+        room.lastMotion = event.recorded_at
+        // Active if motion in last 30 minutes
+        room.isActive = (Date.now() - new Date(event.recorded_at).getTime()) < 30 * 60 * 1000
+      }
+    }
+  }
+
+  return Array.from(roomMap.values()).sort((a, b) => {
+    // Active rooms first, then by name
+    if (a.isActive !== b.isActive) return b.isActive - a.isActive
+    return a.name.localeCompare(b.name)
+  })
+})
+
+// Activity chart for selected room (24 hours)
 const chartData = computed(() => {
-  if (!selectedSensor.value) return []
+  if (!selectedRoom.value) return []
 
-  const sensorData = readings.value.filter(r => r.device_id === selectedSensor.value.id)
-
-  // Group by hour for the last 24 hours
+  const roomMotion = motionEvents.value.filter(e => e.room === selectedRoom.value.name && e.motion)
   const hourlyData = new Map()
   const now = new Date()
 
@@ -38,8 +87,8 @@ const chartData = computed(() => {
   }
 
   // Count events per hour
-  for (const reading of sensorData) {
-    const hour = new Date(reading.recorded_at).toISOString().slice(0, 13)
+  for (const event of roomMotion) {
+    const hour = new Date(event.recorded_at).toISOString().slice(0, 13)
     if (hourlyData.has(hour)) {
       hourlyData.get(hour).count++
     }
@@ -52,122 +101,101 @@ const maxCount = computed(() => {
   return Math.max(...chartData.value.map(d => d.count), 1)
 })
 
-// Fetch unique sensors from readings
-const fetchSensors = async () => {
+// Recent motion events for selected room
+const recentMotion = computed(() => {
+  if (!selectedRoom.value) return []
+  return motionEvents.value
+    .filter(e => e.room === selectedRoom.value.name && e.motion)
+    .slice(0, 20)
+})
+
+// Temperature history for selected room
+const temperatureHistory = computed(() => {
+  if (!selectedRoom.value) return []
+  return sensorReadings.value
+    .filter(r => r.room === selectedRoom.value.name && r.sensor_type === 'temperature')
+    .slice(0, 20)
+})
+
+// Stats
+const stats = computed(() => {
+  const activeRooms = rooms.value.filter(r => r.isActive).length
+  const totalMotion = motionEvents.value.filter(e => e.motion).length
+  const avgTemp = sensorReadings.value
+    .filter(r => r.sensor_type === 'temperature')
+    .reduce((sum, r, _, arr) => sum + r.value / arr.length, 0)
+
+  return {
+    activeRooms,
+    totalRooms: rooms.value.length,
+    totalMotion,
+    avgTemp: avgTemp ? avgTemp.toFixed(1) : '-'
+  }
+})
+
+const fetchData = async () => {
   loading.value = true
 
-  const { data, error } = await supabase
-    .from('sensor_readings')
-    .select('device_id, device_name, capability, value, recorded_at')
-    .order('recorded_at', { ascending: false })
-    .limit(1000)
+  try {
+    // Fetch sensor readings (last 24 hours)
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
 
-  if (error) {
-    console.error('Error fetching sensors:', error)
-    loading.value = false
-    return
-  }
+    const [readingsRes, motionRes] = await Promise.all([
+      supabase
+        .from('sensor_readings')
+        .select('*')
+        .gte('recorded_at', yesterday)
+        .order('recorded_at', { ascending: false })
+        .limit(500),
+      supabase
+        .from('motion_events')
+        .select('*')
+        .gte('recorded_at', yesterday)
+        .order('recorded_at', { ascending: false })
+        .limit(500)
+    ])
 
-  readings.value = data
+    if (readingsRes.data) sensorReadings.value = readingsRes.data
+    if (motionRes.data) motionEvents.value = motionRes.data
 
-  // Group by device_id and get latest reading per capability
-  const deviceMap = new Map()
-
-  for (const reading of data) {
-    if (!deviceMap.has(reading.device_id)) {
-      deviceMap.set(reading.device_id, {
-        id: reading.device_id,
-        name: reading.device_name || reading.device_id,
-        capabilities: new Map(),
-        lastSeen: reading.recorded_at
-      })
+    // Auto-select first room if none selected
+    if (!selectedRoom.value && rooms.value.length > 0) {
+      selectedRoom.value = rooms.value[0]
     }
 
-    const device = deviceMap.get(reading.device_id)
-    if (!device.capabilities.has(reading.capability)) {
-      try {
-        device.capabilities.set(reading.capability, {
-          value: JSON.parse(reading.value),
-          timestamp: reading.recorded_at
-        })
-      } catch {
-        device.capabilities.set(reading.capability, {
-          value: reading.value,
-          timestamp: reading.recorded_at
-        })
-      }
-    }
-  }
-
-  sensors.value = Array.from(deviceMap.values()).map(device => ({
-    ...device,
-    capabilities: Object.fromEntries(device.capabilities),
-    isOnline: isRecent(device.lastSeen, 5)
-  }))
-
-  // Auto-select first sensor
-  if (!selectedSensor.value && sensors.value.length > 0) {
-    selectedSensor.value = sensors.value[0]
+  } catch (error) {
+    console.error('Error fetching data:', error)
   }
 
   lastUpdate.value = new Date()
   loading.value = false
 }
 
-const isRecent = (timestamp, minutes) => {
-  const diff = Date.now() - new Date(timestamp).getTime()
-  return diff < minutes * 60 * 1000
-}
-
 const formatTime = (timestamp) => {
+  if (!timestamp) return '-'
   const date = new Date(timestamp)
   const now = new Date()
   const diff = now - date
 
   if (diff < 60000) return 'Nu'
-  if (diff < 3600000) return `${Math.floor(diff / 60000)}m`
-  if (diff < 86400000) return `${Math.floor(diff / 3600000)}u`
+  if (diff < 3600000) return `${Math.floor(diff / 60000)} min`
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)} uur`
   return date.toLocaleDateString('nl-NL', { day: 'numeric', month: 'short' })
 }
 
-const getSensorIcon = (sensor) => {
-  if (sensor.capabilities.presence) return Radio
-  if (sensor.capabilities.vibration) return Vibrate
-  return Activity
+const formatDateTime = (timestamp) => {
+  return new Date(timestamp).toLocaleString('nl-NL', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  })
 }
-
-const getSensorType = (sensor) => {
-  if (sensor.capabilities.presence) return 'Presence Sensor'
-  if (sensor.capabilities.vibration) return 'Vibration Sensor'
-  return 'Sensor'
-}
-
-const getSensorStatus = (sensor) => {
-  if (sensor.capabilities.presence?.value) return 'Aanwezig'
-  if (sensor.capabilities.vibration?.value) return 'Trilling'
-  if (sensor.capabilities.movement?.value === 'movement') return 'Beweging'
-  return 'Rustig'
-}
-
-const getStatusColor = (sensor) => {
-  if (sensor.capabilities.presence?.value) return 'bg-emerald-500'
-  if (sensor.capabilities.vibration?.value) return 'bg-amber-500'
-  if (sensor.capabilities.movement?.value === 'movement') return 'bg-blue-500'
-  return 'bg-gray-300'
-}
-
-const sensorReadings = computed(() => {
-  if (!selectedSensor.value) return []
-  return readings.value
-    .filter(r => r.device_id === selectedSensor.value.id)
-    .slice(0, 50)
-})
 
 // Auto refresh
 let refreshInterval
 onMounted(() => {
-  fetchSensors()
-  refreshInterval = setInterval(fetchSensors, 30000)
+  fetchData()
+  refreshInterval = setInterval(fetchData, 30000)
 })
 
 onUnmounted(() => {
@@ -179,19 +207,19 @@ onUnmounted(() => {
   <div class="min-h-screen bg-gray-50">
     <!-- Header -->
     <div class="bg-white border-b border-gray-200">
-      <div class="max-w-6xl mx-auto px-6 py-4">
+      <div class="max-w-7xl mx-auto px-6 py-4">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-4">
-            <router-link to="/" class="p-2 text-gray-500 hover:text-gray-900 rounded-lg hover:bg-gray-100 transition-colors">
+            <router-link to="/app" class="p-2 text-gray-500 hover:text-gray-900 rounded-lg hover:bg-gray-100 transition-colors">
               <ArrowLeft class="w-5 h-5" />
             </router-link>
             <div>
-              <h1 class="text-xl font-semibold text-gray-900">Sensoren</h1>
-              <p class="text-sm text-gray-500">{{ sensors.length }} apparaten verbonden</p>
+              <h1 class="text-xl font-semibold text-gray-900">Sensoren Dashboard</h1>
+              <p class="text-sm text-gray-500">{{ stats.totalRooms }} kamers, {{ stats.activeRooms }} actief</p>
             </div>
           </div>
           <button
-            @click="fetchSensors"
+            @click="fetchData"
             class="flex items-center gap-2 px-3 py-2 text-sm text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
           >
             <RefreshCw class="w-4 h-4" :class="{ 'animate-spin': loading }" />
@@ -201,17 +229,67 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div class="max-w-6xl mx-auto px-6 py-8">
+    <div class="max-w-7xl mx-auto px-6 py-8">
+      <!-- Stats Cards -->
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+        <div class="bg-white rounded-xl p-4 border border-gray-200 shadow-sm">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-lg bg-emerald-100 flex items-center justify-center">
+              <Activity class="w-5 h-5 text-emerald-600" />
+            </div>
+            <div>
+              <p class="text-2xl font-bold text-gray-900">{{ stats.activeRooms }}</p>
+              <p class="text-sm text-gray-500">Actieve kamers</p>
+            </div>
+          </div>
+        </div>
+        <div class="bg-white rounded-xl p-4 border border-gray-200 shadow-sm">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center">
+              <Eye class="w-5 h-5 text-blue-600" />
+            </div>
+            <div>
+              <p class="text-2xl font-bold text-gray-900">{{ stats.totalMotion }}</p>
+              <p class="text-sm text-gray-500">Bewegingen (24u)</p>
+            </div>
+          </div>
+        </div>
+        <div class="bg-white rounded-xl p-4 border border-gray-200 shadow-sm">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-lg bg-orange-100 flex items-center justify-center">
+              <Thermometer class="w-5 h-5 text-orange-600" />
+            </div>
+            <div>
+              <p class="text-2xl font-bold text-gray-900">{{ stats.avgTemp }}°</p>
+              <p class="text-sm text-gray-500">Gem. temperatuur</p>
+            </div>
+          </div>
+        </div>
+        <div class="bg-white rounded-xl p-4 border border-gray-200 shadow-sm">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-lg bg-purple-100 flex items-center justify-center">
+              <MapPin class="w-5 h-5 text-purple-600" />
+            </div>
+            <div>
+              <p class="text-2xl font-bold text-gray-900">{{ stats.totalRooms }}</p>
+              <p class="text-sm text-gray-500">Totaal kamers</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="grid lg:grid-cols-3 gap-6">
-        <!-- Sensor List -->
+        <!-- Room List -->
         <div class="lg:col-span-1 space-y-3">
+          <h2 class="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">Kamers</h2>
+
           <div
-            v-for="sensor in sensors"
-            :key="sensor.id"
-            @click="selectedSensor = sensor"
+            v-for="room in rooms"
+            :key="room.name"
+            @click="selectedRoom = room"
             class="bg-white rounded-xl p-4 border cursor-pointer transition-all shadow-sm"
             :class="[
-              selectedSensor?.id === sensor.id
+              selectedRoom?.name === room.name
                 ? 'border-emerald-500 ring-2 ring-emerald-500/20'
                 : 'border-gray-200 hover:border-gray-300 hover:shadow'
             ]"
@@ -220,86 +298,100 @@ onUnmounted(() => {
               <div class="flex items-center gap-3">
                 <div
                   class="w-10 h-10 rounded-lg flex items-center justify-center"
-                  :class="sensor.isOnline ? 'bg-emerald-100' : 'bg-gray-100'"
+                  :class="room.isActive ? 'bg-emerald-100' : 'bg-gray-100'"
                 >
-                  <component
-                    :is="getSensorIcon(sensor)"
+                  <Eye
                     class="w-5 h-5"
-                    :class="sensor.isOnline ? 'text-emerald-600' : 'text-gray-400'"
+                    :class="room.isActive ? 'text-emerald-600' : 'text-gray-400'"
                   />
                 </div>
                 <div>
-                  <h3 class="font-medium text-gray-900">{{ sensor.name }}</h3>
-                  <p class="text-sm text-gray-500">{{ getSensorType(sensor) }}</p>
+                  <h3 class="font-medium text-gray-900">{{ room.name }}</h3>
+                  <p class="text-sm text-gray-500">{{ room.motionCount }} bewegingen</p>
                 </div>
               </div>
-              <ChevronRight class="w-5 h-5 text-gray-400" />
+              <span
+                class="px-2 py-1 rounded-full text-xs font-medium"
+                :class="room.isActive ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'"
+              >
+                {{ room.isActive ? 'Actief' : 'Rustig' }}
+              </span>
             </div>
 
-            <div class="mt-4 flex items-center justify-between">
-              <div class="flex items-center gap-2">
-                <span class="w-2 h-2 rounded-full" :class="getStatusColor(sensor)" />
-                <span class="text-sm text-gray-600">{{ getSensorStatus(sensor) }}</span>
+            <div class="mt-4 flex items-center justify-between text-sm">
+              <div class="flex items-center gap-2 text-gray-500" v-if="room.temperature">
+                <Thermometer class="w-4 h-4" />
+                <span>{{ room.temperature.toFixed(1) }}°C</span>
               </div>
               <div class="flex items-center gap-1 text-gray-400">
-                <component :is="sensor.isOnline ? Wifi : WifiOff" class="w-4 h-4" />
-                <span class="text-xs">{{ formatTime(sensor.lastSeen) }}</span>
+                <Clock class="w-4 h-4" />
+                <span>{{ formatTime(room.lastMotion) }}</span>
               </div>
             </div>
           </div>
 
-          <div v-if="sensors.length === 0 && !loading" class="text-center py-12">
+          <div v-if="rooms.length === 0 && !loading" class="text-center py-12">
             <Activity class="w-12 h-12 text-gray-300 mx-auto mb-4" />
-            <p class="text-gray-500">Geen sensoren gevonden</p>
-            <p class="text-sm text-gray-400 mt-1">Wachtend op data van de hub...</p>
+            <p class="text-gray-500">Geen data gevonden</p>
+            <p class="text-sm text-gray-400 mt-1">Wachtend op sensor data...</p>
           </div>
         </div>
 
-        <!-- Sensor Detail -->
+        <!-- Room Detail -->
         <div class="lg:col-span-2 space-y-6">
-          <template v-if="selectedSensor">
-            <!-- Sensor Info -->
+          <template v-if="selectedRoom">
+            <!-- Room Info -->
             <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
               <div class="p-6 border-b border-gray-100">
                 <div class="flex items-center gap-4">
                   <div
                     class="w-14 h-14 rounded-xl flex items-center justify-center"
-                    :class="selectedSensor.isOnline ? 'bg-emerald-100' : 'bg-gray-100'"
+                    :class="selectedRoom.isActive ? 'bg-emerald-100' : 'bg-gray-100'"
                   >
-                    <component
-                      :is="getSensorIcon(selectedSensor)"
+                    <Eye
                       class="w-7 h-7"
-                      :class="selectedSensor.isOnline ? 'text-emerald-600' : 'text-gray-400'"
+                      :class="selectedRoom.isActive ? 'text-emerald-600' : 'text-gray-400'"
                     />
                   </div>
                   <div>
-                    <h2 class="text-xl font-semibold text-gray-900">{{ selectedSensor.name }}</h2>
-                    <p class="text-gray-500">{{ getSensorType(selectedSensor) }}</p>
+                    <h2 class="text-xl font-semibold text-gray-900">{{ selectedRoom.name }}</h2>
+                    <p class="text-gray-500">{{ selectedRoom.motionCount }} bewegingen vandaag</p>
                   </div>
                   <span
                     class="ml-auto px-3 py-1 rounded-full text-sm font-medium"
-                    :class="selectedSensor.isOnline ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'"
+                    :class="selectedRoom.isActive ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'"
                   >
-                    {{ selectedSensor.isOnline ? 'Online' : 'Offline' }}
+                    {{ selectedRoom.isActive ? 'Actief' : 'Rustig' }}
                   </span>
                 </div>
               </div>
 
-              <!-- Capabilities Grid -->
+              <!-- Current Values -->
               <div class="p-6">
                 <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">
-                  Huidige Status
+                  Huidige Waarden
                 </h3>
                 <div class="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                  <div
-                    v-for="(cap, key) in selectedSensor.capabilities"
-                    :key="key"
-                    class="bg-gray-50 rounded-lg p-4"
-                  >
-                    <p class="text-xs text-gray-500 uppercase tracking-wider mb-1">{{ key }}</p>
-                    <p class="text-lg font-semibold text-gray-900">
-                      {{ typeof cap.value === 'boolean' ? (cap.value ? 'Ja' : 'Nee') : cap.value }}
-                    </p>
+                  <div class="bg-gray-50 rounded-lg p-4" v-if="selectedRoom.temperature">
+                    <div class="flex items-center gap-2 mb-1">
+                      <Thermometer class="w-4 h-4 text-orange-500" />
+                      <p class="text-xs text-gray-500 uppercase tracking-wider">Temperatuur</p>
+                    </div>
+                    <p class="text-2xl font-semibold text-gray-900">{{ selectedRoom.temperature.toFixed(1) }}°C</p>
+                  </div>
+                  <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="flex items-center gap-2 mb-1">
+                      <Eye class="w-4 h-4 text-blue-500" />
+                      <p class="text-xs text-gray-500 uppercase tracking-wider">Laatste beweging</p>
+                    </div>
+                    <p class="text-2xl font-semibold text-gray-900">{{ formatTime(selectedRoom.lastMotion) }}</p>
+                  </div>
+                  <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="flex items-center gap-2 mb-1">
+                      <Activity class="w-4 h-4 text-emerald-500" />
+                      <p class="text-xs text-gray-500 uppercase tracking-wider">Bewegingen</p>
+                    </div>
+                    <p class="text-2xl font-semibold text-gray-900">{{ selectedRoom.motionCount }}</p>
                   </div>
                 </div>
               </div>
@@ -338,36 +430,54 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <!-- Recent Activity Table -->
+            <!-- Recent Motion -->
             <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
               <div class="p-6 border-b border-gray-100">
-                <h3 class="text-lg font-semibold text-gray-900">Recente Activiteit</h3>
+                <h3 class="text-lg font-semibold text-gray-900">Recente Bewegingen</h3>
               </div>
-              <div class="max-h-80 overflow-y-auto">
-                <table class="w-full">
-                  <thead class="bg-gray-50 sticky top-0">
-                    <tr>
-                      <th class="text-left text-xs text-gray-500 uppercase tracking-wider px-6 py-3">Tijd</th>
-                      <th class="text-left text-xs text-gray-500 uppercase tracking-wider px-6 py-3">Capability</th>
-                      <th class="text-left text-xs text-gray-500 uppercase tracking-wider px-6 py-3">Waarde</th>
-                    </tr>
-                  </thead>
-                  <tbody class="divide-y divide-gray-100">
-                    <tr
-                      v-for="(reading, index) in sensorReadings"
-                      :key="index"
-                      class="hover:bg-gray-50"
-                    >
-                      <td class="px-6 py-3 text-sm text-gray-500">
-                        {{ new Date(reading.recorded_at).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }}
-                      </td>
-                      <td class="px-6 py-3">
-                        <span class="text-sm font-mono text-gray-700">{{ reading.capability }}</span>
-                      </td>
-                      <td class="px-6 py-3 text-sm text-gray-900">{{ reading.value }}</td>
-                    </tr>
-                  </tbody>
-                </table>
+              <div class="max-h-60 overflow-y-auto">
+                <div v-if="recentMotion.length === 0" class="p-6 text-center text-gray-500">
+                  Geen bewegingen gedetecteerd
+                </div>
+                <div v-else class="divide-y divide-gray-100">
+                  <div
+                    v-for="(event, index) in recentMotion"
+                    :key="index"
+                    class="px-6 py-3 flex items-center justify-between hover:bg-gray-50"
+                  >
+                    <div class="flex items-center gap-3">
+                      <div class="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center">
+                        <Eye class="w-4 h-4 text-emerald-600" />
+                      </div>
+                      <span class="text-sm text-gray-700">Beweging gedetecteerd</span>
+                    </div>
+                    <span class="text-sm text-gray-500">{{ formatDateTime(event.recorded_at) }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Temperature History -->
+            <div v-if="temperatureHistory.length > 0" class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+              <div class="p-6 border-b border-gray-100">
+                <h3 class="text-lg font-semibold text-gray-900">Temperatuur Historie</h3>
+              </div>
+              <div class="max-h-60 overflow-y-auto">
+                <div class="divide-y divide-gray-100">
+                  <div
+                    v-for="(reading, index) in temperatureHistory"
+                    :key="index"
+                    class="px-6 py-3 flex items-center justify-between hover:bg-gray-50"
+                  >
+                    <div class="flex items-center gap-3">
+                      <div class="w-8 h-8 rounded-full bg-orange-100 flex items-center justify-center">
+                        <Thermometer class="w-4 h-4 text-orange-600" />
+                      </div>
+                      <span class="text-lg font-medium text-gray-900">{{ reading.value.toFixed(1) }}°C</span>
+                    </div>
+                    <span class="text-sm text-gray-500">{{ formatDateTime(reading.recorded_at) }}</span>
+                  </div>
+                </div>
               </div>
             </div>
           </template>
@@ -375,10 +485,10 @@ onUnmounted(() => {
           <!-- Empty State -->
           <div v-else class="bg-white rounded-xl border border-gray-200 p-12 text-center shadow-sm">
             <div class="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center mx-auto mb-4">
-              <Activity class="w-8 h-8 text-gray-400" />
+              <MapPin class="w-8 h-8 text-gray-400" />
             </div>
-            <h3 class="text-lg font-medium text-gray-900 mb-1">Selecteer een sensor</h3>
-            <p class="text-gray-500">Klik op een sensor om details en grafieken te bekijken</p>
+            <h3 class="text-lg font-medium text-gray-900 mb-1">Selecteer een kamer</h3>
+            <p class="text-gray-500">Klik op een kamer om details en grafieken te bekijken</p>
           </div>
         </div>
       </div>
