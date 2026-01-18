@@ -14,7 +14,11 @@ const password = ref('')
 const rememberMe = ref(false)
 
 const handleSubmit = async () => {
-  await authStore.login(username.value, password.value)
+  await authStore.login({
+    username: username.value,
+    email: username.value,
+    password: password.value
+  })
 }
 </script>
 
@@ -35,8 +39,9 @@ const handleSubmit = async () => {
         <form @submit.prevent="handleSubmit" class="space-y-4">
           <Input
             v-model="username"
-            label="Gebruikersnaam"
-            type="text"
+            label="E-mailadres"
+            type="email"
+            placeholder="demo@gerustthuis.nl"
             required
             :error="authStore.error"
           />
