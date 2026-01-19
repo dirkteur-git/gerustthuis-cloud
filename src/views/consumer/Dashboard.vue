@@ -52,9 +52,19 @@ const fetchData = async () => {
         .limit(1000)
     ])
 
+    console.log('Motion response:', motionRes)
+    console.log('Door response:', doorRes)
+    console.log('Readings response:', readingsRes)
+
+    if (motionRes.error) console.error('Motion error:', motionRes.error)
+    if (doorRes.error) console.error('Door error:', doorRes.error)
+    if (readingsRes.error) console.error('Readings error:', readingsRes.error)
+
     if (motionRes.data) motionEvents.value = motionRes.data
     if (doorRes.data) doorEvents.value = doorRes.data
     if (readingsRes.data) allSensorReadings.value = readingsRes.data
+
+    console.log('Loaded:', motionEvents.value.length, 'motion,', doorEvents.value.length, 'door events')
 
   } catch (error) {
     console.error('Error fetching data:', error)
