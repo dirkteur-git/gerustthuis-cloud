@@ -95,6 +95,15 @@ const routes = [
     ]
   },
 
+  // Hue OAuth callback fallback (oude URL zonder /app)
+  {
+    path: '/hue/callback',
+    name: 'hue-callback-legacy',
+    redirect: to => {
+      // Redirect naar /app/hue/callback met query params behouden
+      return { path: '/app/hue/callback', query: to.query }
+    }
+  },
 
   // Business Dashboard (/pro/*)
   {

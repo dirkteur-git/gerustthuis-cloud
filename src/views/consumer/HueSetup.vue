@@ -44,10 +44,15 @@ async function checkExistingConnection() {
   loading.value = true
 
   try {
+    if (!authStore.user?.id) {
+      loading.value = false
+      return
+    }
+
     const { data, error: fetchError } = await supabase
       .from('hue_connections')
       .select('*')
-      .eq('user_id', authStore.user?.id)
+      .eq('user_id', authStore.user.id)
       .single()
 
     if (data && !fetchError) {
@@ -63,7 +68,7 @@ async function checkExistingConnection() {
       await loadSensors()
     }
   } catch (e) {
-    // No connection found, stay on step 1
+    console.log('No existing Hue connection or table not found')
   } finally {
     loading.value = false
   }
