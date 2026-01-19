@@ -81,8 +81,21 @@ const routes = [
         path: 'instellingen',
         name: 'consumer-instellingen',
         component: () => import('@/views/consumer/Instellingen.vue')
+      },
+      {
+        path: 'hue',
+        name: 'consumer-hue',
+        component: () => import('@/views/consumer/HueSetup.vue')
       }
     ]
+  },
+
+  // Hue OAuth callback (no layout)
+  {
+    path: '/hue/callback',
+    name: 'hue-callback',
+    component: () => import('@/views/consumer/HueSetup.vue'),
+    meta: { requiresAuth: true }
   },
 
   // Business Dashboard (/pro/*)

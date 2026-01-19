@@ -9,7 +9,8 @@ import {
   Radio,
   Users,
   Settings,
-  LogOut
+  LogOut,
+  Lightbulb
 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -21,6 +22,7 @@ const navigation = [
   { name: 'Alerts', href: '/app/alerts', icon: Bell },
   { name: 'Dagboek', href: '/app/dagboek', icon: BookOpen },
   { name: 'Sensoren', href: '/app/sensoren', icon: Radio },
+  { name: 'Philips Hue', href: '/app/hue', icon: Lightbulb },
   { name: 'Familie', href: '/app/familie', icon: Users },
   { name: 'Instellingen', href: '/app/instellingen', icon: Settings }
 ]

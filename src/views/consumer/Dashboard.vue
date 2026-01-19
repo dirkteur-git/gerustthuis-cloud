@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { supabase } from '@/services/supabase'
+import { useAuthStore } from '@/stores/auth'
 import {
   RefreshCw,
   Activity,
@@ -15,6 +16,8 @@ import {
   Table
 } from 'lucide-vue-next'
 
+const authStore = useAuthStore()
+
 // Data
 const motionEvents = ref([])
 const doorEvents = ref([])
@@ -23,11 +26,17 @@ const loading = ref(true)
 const lastUpdate = ref(null)
 const expandedSensor = ref(null)
 
-// Fetch data from Supabase
+// Fetch data from Supabase - filtered by user_id
 const fetchData = async () => {
   loading.value = true
 
   try {
+    const userId = authStore.user?.id
+    if (!userId) {
+      loading.value = false
+      return
+    }
+
     // Get data from last 7 days for weekly heatmap
     const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
 
@@ -35,36 +44,29 @@ const fetchData = async () => {
       supabase
         .from('motion_events')
         .select('*')
+        .eq('user_id', userId)
         .gte('recorded_at', weekAgo)
         .order('recorded_at', { ascending: false })
         .limit(2000),
       supabase
         .from('door_events')
         .select('*')
+        .eq('user_id', userId)
         .gte('recorded_at', weekAgo)
         .order('recorded_at', { ascending: false })
         .limit(1000),
       supabase
         .from('sensor_readings')
         .select('*')
+        .eq('user_id', userId)
         .gte('recorded_at', weekAgo)
         .order('recorded_at', { ascending: false })
         .limit(1000)
     ])
 
-    console.log('Motion response:', motionRes)
-    console.log('Door response:', doorRes)
-    console.log('Readings response:', readingsRes)
-
-    if (motionRes.error) console.error('Motion error:', motionRes.error)
-    if (doorRes.error) console.error('Door error:', doorRes.error)
-    if (readingsRes.error) console.error('Readings error:', readingsRes.error)
-
     if (motionRes.data) motionEvents.value = motionRes.data
     if (doorRes.data) doorEvents.value = doorRes.data
     if (readingsRes.data) allSensorReadings.value = readingsRes.data
-
-    console.log('Loaded:', motionEvents.value.length, 'motion,', doorEvents.value.length, 'door events')
 
   } catch (error) {
     console.error('Error fetching data:', error)

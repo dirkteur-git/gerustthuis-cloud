@@ -1,33 +1,50 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import router from '@/router'
+import { supabase } from '@/services/supabase'
 
 export const useAuthStore = defineStore('auth', () => {
 
   // State
   const user = ref(null)
-  const token = ref(localStorage.getItem('gerustthuis_token') || null)
+  const profile = ref(null)
   const loading = ref(false)
   const error = ref('')
 
   // Computed
-  const isAuthenticated = computed(() => !!token.value && !!user.value)
+  const isAuthenticated = computed(() => !!user.value)
 
   const userInitials = computed(() => {
-    if (!user.value) return ''
-    const first = user.value.firstName?.[0] || ''
-    const last = user.value.lastName?.[0] || ''
+    if (!profile.value) return ''
+    const first = profile.value.first_name?.[0] || ''
+    const last = profile.value.last_name?.[0] || ''
     return (first + last).toUpperCase()
   })
 
   // Role-based computed properties
-  const role = computed(() => user.value?.role || null)
+  const role = computed(() => profile.value?.role || null)
   const isConsumer = computed(() => role.value === 'consumer')
   const isBusiness = computed(() => role.value === 'business')
   const isAdmin = computed(() => role.value === 'admin')
 
-  const organization = computed(() => user.value?.organization || null)
-  const household = computed(() => user.value?.household || null)
+  const organization = computed(() => profile.value?.organization || null)
+  const household = computed(() => profile.value?.household || null)
+
+  // Fetch user profile from profiles table
+  async function fetchProfile(userId) {
+    const { data, error: profileError } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', userId)
+      .single()
+
+    if (profileError) {
+      console.error('Error fetching profile:', profileError)
+      return null
+    }
+
+    return data
+  }
 
   // Actions
   async function login(credentials) {
@@ -35,65 +52,31 @@ export const useAuthStore = defineStore('auth', () => {
     error.value = ''
 
     try {
-      // Demo authentication - check against environment variables or demo credentials
-      const demoUsers = {
-        // Consumer demo user
-        'demo@gerustthuis.nl': {
-          password: 'demo123',
-          user: {
-            id: 'consumer-1',
-            username: 'demo',
-            firstName: 'Jan',
-            lastName: 'de Vries',
-            email: 'demo@gerustthuis.nl',
-            role: 'consumer',
-            household: {
-              id: 'household-1',
-              name: 'Familie de Vries',
-              elderName: 'Oma Ans'
-            }
-          }
-        },
-        // Business demo user
-        'zorg@gerustthuis.nl': {
-          password: 'zorg123',
-          user: {
-            id: 'business-1',
-            username: 'zorginstelling',
-            firstName: 'Marianne',
-            lastName: 'Bakker',
-            email: 'zorg@gerustthuis.nl',
-            role: 'business',
-            organization: 'Zorginstelling De Eik'
-          }
-        }
-      }
+      const { data, error: authError } = await supabase.auth.signInWithPassword({
+        email: credentials.email || credentials.username,
+        password: credentials.password
+      })
 
-      // Simulate API delay
-      await new Promise(resolve => setTimeout(resolve, 500))
-
-      const demoUser = demoUsers[credentials.username] || demoUsers[credentials.email]
-
-      if (demoUser && demoUser.password === credentials.password) {
-        const newToken = 'demo-token-' + Date.now()
-        token.value = newToken
-        user.value = demoUser.user
-        localStorage.setItem('gerustthuis_token', newToken)
-        localStorage.setItem('gerustthuis_user', JSON.stringify(demoUser.user))
-
-        // Redirect based on role
-        if (demoUser.user.role === 'business') {
-          router.push('/pro/dashboard')
-        } else {
-          router.push('/app/dashboard')
-        }
-
-        return true
-      } else {
-        error.value = 'Ongeldige inloggegevens'
+      if (authError) {
+        error.value = authError.message === 'Invalid login credentials'
+          ? 'Ongeldige inloggegevens'
+          : authError.message
         return false
       }
+
+      user.value = data.user
+      profile.value = await fetchProfile(data.user.id)
+
+      // Redirect based on role
+      if (profile.value?.role === 'business') {
+        router.push('/pro/dashboard')
+      } else {
+        router.push('/app/dashboard')
+      }
+
+      return true
     } catch (e) {
+      console.error('Login error:', e)
       error.value = 'Er is een fout opgetreden'
       return false
     } finally {
@@ -106,28 +89,44 @@ export const useAuthStore = defineStore('auth', () => {
     error.value = ''
 
     try {
-      await new Promise(resolve => setTimeout(resolve, 500))
-
-      // Demo registration - create consumer account
-      const newUser = {
-        id: 'consumer-' + Date.now(),
-        username: data.email,
-        firstName: data.firstName,
-        lastName: data.lastName,
+      const { data: authData, error: authError } = await supabase.auth.signUp({
         email: data.email,
-        role: 'consumer',
-        household: null
+        password: data.password,
+        options: {
+          data: {
+            first_name: data.firstName,
+            last_name: data.lastName
+          }
+        }
+      })
+
+      if (authError) {
+        error.value = authError.message
+        return false
       }
 
-      const newToken = 'demo-token-' + Date.now()
-      token.value = newToken
-      user.value = newUser
-      localStorage.setItem('gerustthuis_token', newToken)
-      localStorage.setItem('gerustthuis_user', JSON.stringify(newUser))
+      // Create profile
+      const { error: profileError } = await supabase
+        .from('profiles')
+        .insert({
+          id: authData.user.id,
+          email: data.email,
+          first_name: data.firstName,
+          last_name: data.lastName,
+          role: 'consumer'
+        })
+
+      if (profileError) {
+        console.error('Profile creation error:', profileError)
+      }
+
+      user.value = authData.user
+      profile.value = await fetchProfile(authData.user.id)
 
       router.push('/app/dashboard')
       return true
     } catch (e) {
+      console.error('Registration error:', e)
       error.value = 'Registratie mislukt'
       return false
     } finally {
@@ -136,26 +135,19 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function logout() {
-    token.value = null
+    await supabase.auth.signOut()
     user.value = null
-    localStorage.removeItem('gerustthuis_token')
-    localStorage.removeItem('gerustthuis_user')
+    profile.value = null
     router.push('/login')
   }
 
   async function checkAuth() {
-    const storedToken = localStorage.getItem('gerustthuis_token')
-    const storedUser = localStorage.getItem('gerustthuis_user')
+    const { data: { session } } = await supabase.auth.getSession()
 
-    if (storedToken && storedUser) {
-      try {
-        token.value = storedToken
-        user.value = JSON.parse(storedUser)
-        return true
-      } catch (e) {
-        logout()
-        return false
-      }
+    if (session?.user) {
+      user.value = session.user
+      profile.value = await fetchProfile(session.user.id)
+      return true
     }
 
     return false
@@ -166,7 +158,15 @@ export const useAuthStore = defineStore('auth', () => {
     error.value = ''
 
     try {
-      await new Promise(resolve => setTimeout(resolve, 500))
+      const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: `${window.location.origin}/reset-password`
+      })
+
+      if (resetError) {
+        error.value = resetError.message
+        return false
+      }
+
       return true
     } catch (e) {
       error.value = 'Kon geen reset e-mail versturen'
@@ -179,13 +179,24 @@ export const useAuthStore = defineStore('auth', () => {
   // Get redirect path based on user role
   function getRedirectPath() {
     if (!user.value) return '/login'
-    return user.value.role === 'business' ? '/pro/dashboard' : '/app/dashboard'
+    return profile.value?.role === 'business' ? '/pro/dashboard' : '/app/dashboard'
   }
+
+  // Listen for auth changes
+  supabase?.auth.onAuthStateChange(async (event, session) => {
+    if (event === 'SIGNED_IN' && session?.user) {
+      user.value = session.user
+      profile.value = await fetchProfile(session.user.id)
+    } else if (event === 'SIGNED_OUT') {
+      user.value = null
+      profile.value = null
+    }
+  })
 
   return {
     // State
     user,
-    token,
+    profile,
     loading,
     error,
 
