@@ -86,23 +86,17 @@ const routes = [
         path: 'hue',
         name: 'consumer-hue',
         component: () => import('@/views/consumer/HueSetup.vue')
-      },
-      {
-        path: 'hue/callback',
-        name: 'hue-callback',
-        component: () => import('@/views/consumer/HueSetup.vue')
       }
     ]
   },
 
-  // Hue OAuth callback fallback (oude URL zonder /app)
+  // Hue OAuth callback - MUST be outside auth-protected routes
+  // This handles the callback from Philips Hue OAuth
   {
     path: '/hue/callback',
-    name: 'hue-callback-legacy',
-    redirect: to => {
-      // Redirect naar /app/hue/callback met query params behouden
-      return { path: '/app/hue/callback', query: to.query }
-    }
+    name: 'hue-callback',
+    component: () => import('@/views/consumer/HueCallback.vue'),
+    meta: { requiresAuth: false }
   },
 
   // Business Dashboard (/pro/*)

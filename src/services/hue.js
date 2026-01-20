@@ -17,7 +17,7 @@ const HUE_API_URL = 'https://api.meethue.com/route'
 // These should come from environment variables
 const CLIENT_ID = import.meta.env.VITE_HUE_CLIENT_ID
 const CLIENT_SECRET = import.meta.env.VITE_HUE_CLIENT_SECRET
-const REDIRECT_URI = import.meta.env.VITE_HUE_REDIRECT_URI || `${window.location.origin}/app/hue/callback`
+const REDIRECT_URI = import.meta.env.VITE_HUE_REDIRECT_URI || `${window.location.origin}/hue/callback`
 
 /**
  * Generate OAuth2 authorization URL

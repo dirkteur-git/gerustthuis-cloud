@@ -33,9 +33,14 @@ const syncingData = ref(false)
 onMounted(async () => {
   await checkExistingConnection()
 
-  // Handle OAuth callback
-  if (route.query.code) {
-    await handleOAuthCallback(route.query.code)
+  // Handle OAuth callback - check localStorage for code from HueCallback.vue
+  const storedCode = localStorage.getItem('hue_oauth_code')
+  if (storedCode) {
+    console.log('Found stored OAuth code, processing...')
+    // Clear it immediately to prevent re-processing
+    localStorage.removeItem('hue_oauth_code')
+    localStorage.removeItem('hue_oauth_callback_state')
+    await handleOAuthCallback(storedCode)
   }
 })
 
