@@ -11,13 +11,16 @@
  */
 
 const HUE_AUTH_URL = 'https://api.meethue.com/v2/oauth2/authorize'
-const HUE_TOKEN_URL = 'https://api.meethue.com/v2/oauth2/token'
 const HUE_API_URL = 'https://api.meethue.com/route'
 
 // These should come from environment variables
 const CLIENT_ID = import.meta.env.VITE_HUE_CLIENT_ID
 const CLIENT_SECRET = import.meta.env.VITE_HUE_CLIENT_SECRET
 const REDIRECT_URI = import.meta.env.VITE_HUE_REDIRECT_URI || `${window.location.origin}/hue/callback`
+
+// Supabase Edge Functions for OAuth token exchange (replaces local proxy)
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY
 
 /**
  * Generate OAuth2 authorization URL
@@ -36,110 +39,115 @@ export function getAuthorizationUrl(state) {
 
 /**
  * Exchange authorization code for access token
+ * Uses Supabase Edge Function (hue-token-exchange)
  */
 export async function exchangeCodeForToken(code) {
-  const credentials = btoa(`${CLIENT_ID}:${CLIENT_SECRET}`)
+  console.log('[Hue] Exchanging code via Supabase Edge Function')
 
-  const response = await fetch(HUE_TOKEN_URL, {
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/hue-token-exchange`, {
     method: 'POST',
     headers: {
-      'Authorization': `Basic ${credentials}`,
-      'Content-Type': 'application/x-www-form-urlencoded'
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
     },
-    body: new URLSearchParams({
-      grant_type: 'authorization_code',
+    body: JSON.stringify({
       code: code,
-      redirect_uri: REDIRECT_URI
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      grant_type: 'authorization_code'
     })
   })
 
+  const data = await response.json()
+
   if (!response.ok) {
-    const error = await response.text()
-    throw new Error(`Token exchange failed: ${error}`)
+    console.error('[Hue] Token exchange error:', data)
+    throw new Error(data.error || 'Token exchange failed')
   }
 
-  return response.json()
+  console.log('[Hue] Token exchange successful')
+  return data
 }
 
 /**
  * Refresh access token using refresh token
+ * Uses Supabase Edge Function (hue-token-exchange)
  */
 export async function refreshAccessToken(refreshToken) {
-  const credentials = btoa(`${CLIENT_ID}:${CLIENT_SECRET}`)
+  console.log('[Hue] Refreshing token via Supabase Edge Function')
 
-  const response = await fetch(HUE_TOKEN_URL, {
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/hue-token-exchange`, {
     method: 'POST',
     headers: {
-      'Authorization': `Basic ${credentials}`,
-      'Content-Type': 'application/x-www-form-urlencoded'
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
     },
-    body: new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: refreshToken
+    body: JSON.stringify({
+      refresh_token: refreshToken,
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      grant_type: 'refresh_token'
     })
   })
 
+  const data = await response.json()
+
   if (!response.ok) {
-    throw new Error('Token refresh failed')
+    console.error('[Hue] Token refresh error:', data)
+    throw new Error(data.error || 'Token refresh failed')
   }
 
-  return response.json()
+  console.log('[Hue] Token refresh successful')
+  return data
 }
 
 /**
  * Get whitelist username for the bridge
- * This links the OAuth token to the bridge
+ * Uses Supabase Edge Function (hue-link-bridge)
  */
 export async function linkBridge(accessToken) {
-  const response = await fetch(`${HUE_API_URL}/api/0/config`, {
-    method: 'PUT',
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      linkbutton: true
-    })
-  })
+  console.log('[Hue] Linking bridge via Supabase Edge Function')
 
-  // Now create the whitelist entry
-  const createResponse = await fetch(`${HUE_API_URL}/api`, {
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/hue-link-bridge`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
     },
-    body: JSON.stringify({
-      devicetype: 'sensor_care_app'
-    })
+    body: JSON.stringify({ access_token: accessToken })
   })
 
-  if (!createResponse.ok) {
-    throw new Error('Failed to link bridge')
+  const data = await response.json()
+
+  if (!response.ok) {
+    console.error('[Hue] Bridge linking error:', data)
+    throw new Error(data.error || 'Failed to link bridge')
   }
 
-  const result = await createResponse.json()
-
-  // Result contains the username
-  if (result[0]?.success?.username) {
-    return result[0].success.username
-  }
-
-  throw new Error('Failed to get bridge username')
+  console.log('[Hue] Bridge linked successfully, username:', data.username)
+  return data.username
 }
 
 /**
- * Get all sensors from the bridge
+ * Get all sensors from the bridge via Edge Function (CORS proxy)
  */
 export async function getSensors(accessToken, username) {
-  const response = await fetch(`${HUE_API_URL}/api/${username}/sensors`, {
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/hue-api`, {
+    method: 'POST',
     headers: {
-      'Authorization': `Bearer ${accessToken}`
-    }
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+    },
+    body: JSON.stringify({
+      endpoint: 'sensors',
+      accessToken,
+      username
+    })
   })
 
   if (!response.ok) {
-    throw new Error('Failed to get sensors')
+    const error = await response.json().catch(() => ({}))
+    throw new Error(error.error || 'Failed to get sensors')
   }
 
   return response.json()
@@ -223,6 +231,202 @@ export async function getAllSensorStates(accessToken, username) {
 }
 
 /**
+ * Get contact sensors (door/window sensors) via v2 CLIP API
+ * These sensors are only available in v2 API
+ */
+export async function getContactSensors(accessToken, username) {
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/hue-api`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+    },
+    body: JSON.stringify({
+      endpoint: 'contact',
+      accessToken,
+      username,
+      apiVersion: 'v2'
+    })
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}))
+    console.warn('[Hue] Contact sensors not available:', error.error || 'Unknown error')
+    return [] // Return empty array if no contact sensors
+  }
+
+  const data = await response.json()
+
+  // v2 API returns { data: [...] }
+  const contacts = data.data || []
+
+  return contacts.map(contact => ({
+    id: contact.id,
+    name: contact.metadata?.name || 'Contact Sensor',
+    type: 'contact',
+    contact_report: contact.contact_report?.state || 'unknown', // 'contact' or 'no_contact'
+    lastUpdated: contact.contact_report?.changed,
+    enabled: contact.enabled
+  }))
+}
+
+/**
+ * Get all devices via v2 CLIP API (includes all device types)
+ */
+export async function getAllDevicesV2(accessToken, username) {
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/hue-api`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+    },
+    body: JSON.stringify({
+      endpoint: 'device',
+      accessToken,
+      username,
+      apiVersion: 'v2'
+    })
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}))
+    throw new Error(error.error || 'Failed to get devices from v2 API')
+  }
+
+  const data = await response.json()
+  return data.data || []
+}
+
+/**
+ * Get all rooms/groups from the bridge via Edge Function
+ */
+export async function getRooms(accessToken, username) {
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/hue-api`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+    },
+    body: JSON.stringify({
+      endpoint: 'groups',
+      accessToken,
+      username
+    })
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}))
+    throw new Error(error.error || 'Failed to get rooms')
+  }
+
+  const groups = await response.json()
+  const rooms = []
+
+  for (const [id, group] of Object.entries(groups)) {
+    // Only include "Room" type groups (not entertainment zones, zones, etc.)
+    if (group.type === 'Room') {
+      rooms.push({
+        id,
+        name: group.name,
+        class: group.class, // e.g., 'Living room', 'Bedroom', 'Kitchen'
+        lights: group.lights || [],
+        sensors: group.sensors || [],
+        state: {
+          allOn: group.state?.all_on || false,
+          anyOn: group.state?.any_on || false
+        }
+      })
+    }
+  }
+
+  return rooms
+}
+
+/**
+ * Get all lights from the bridge via Edge Function
+ */
+export async function getLights(accessToken, username) {
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/hue-api`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+    },
+    body: JSON.stringify({
+      endpoint: 'lights',
+      accessToken,
+      username
+    })
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}))
+    throw new Error(error.error || 'Failed to get lights')
+  }
+
+  const lights = await response.json()
+  const result = []
+
+  for (const [id, light] of Object.entries(lights)) {
+    result.push({
+      id,
+      uniqueid: light.uniqueid,
+      name: light.name,
+      type: light.type,
+      modelid: light.modelid,
+      productname: light.productname,
+      state: {
+        on: light.state?.on || false,
+        bri: light.state?.bri, // 0-254
+        reachable: light.state?.reachable
+      }
+    })
+  }
+
+  return result
+}
+
+/**
+ * Get full bridge configuration with rooms, sensors, lights, and contact sensors
+ */
+export async function getFullConfig(accessToken, username) {
+  // Fetch v1 and v2 API data in parallel
+  const [rooms, sensors, lights, contactSensors] = await Promise.all([
+    getRooms(accessToken, username),
+    getAllSensorStates(accessToken, username),
+    getLights(accessToken, username),
+    getContactSensors(accessToken, username).catch(err => {
+      console.warn('[Hue] Could not fetch contact sensors:', err)
+      return []
+    })
+  ])
+
+  // Map sensors and lights to their rooms
+  for (const room of rooms) {
+    room.sensorDetails = sensors.filter(s => {
+      // Match sensor to room by checking if sensor ID is in room's sensors array
+      // Note: Hue sensors are split into multiple IDs (presence, temp, light)
+      return room.sensors.some(roomSensorId => s.id?.includes(roomSensorId))
+    })
+
+    room.lightDetails = lights.filter(l => room.lights.includes(l.id))
+  }
+
+  // Combine motion sensors and contact sensors
+  const allSensors = [
+    ...sensors,
+    ...contactSensors
+  ]
+
+  return {
+    rooms,
+    sensors: allSensors,
+    lights,
+    contactSensors // Also expose separately for easy access
+  }
+}
+
+/**
  * Check if Hue credentials are configured
  */
 export function isConfigured() {
@@ -237,5 +441,10 @@ export default {
   getSensors,
   getMotionSensors,
   getAllSensorStates,
+  getContactSensors,
+  getAllDevicesV2,
+  getRooms,
+  getLights,
+  getFullConfig,
   isConfigured
 }

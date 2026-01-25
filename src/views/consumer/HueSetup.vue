@@ -31,50 +31,208 @@ const syncingData = ref(false)
 
 // Check if already connected
 onMounted(async () => {
-  await checkExistingConnection()
+  console.log('[HueSetup] onMounted starting...')
 
-  // Handle OAuth callback - check localStorage for code from HueCallback.vue
-  const storedCode = localStorage.getItem('hue_oauth_code')
-  if (storedCode) {
-    console.log('Found stored OAuth code, processing...')
-    // Clear it immediately to prevent re-processing
-    localStorage.removeItem('hue_oauth_code')
-    localStorage.removeItem('hue_oauth_callback_state')
-    await handleOAuthCallback(storedCode)
+  // Wait for auth to be initialized
+  let attempts = 0
+  while (!authStore.initialized && attempts < 50) {
+    await new Promise(resolve => setTimeout(resolve, 100))
+    attempts++
   }
+  console.log('[HueSetup] Auth initialized after', attempts, 'attempts. User:', authStore.user?.id)
+
+  // Check if user is logged in
+  if (!authStore.user?.id) {
+    console.error('[HueSetup] No user ID available')
+    error.value = 'Je moet ingelogd zijn om Hue te koppelen'
+    loading.value = false
+    return
+  }
+
+  // First check for pending connection from HueCallback.vue
+  const pendingConnection = localStorage.getItem('hue_pending_connection')
+  console.log('[HueSetup] Pending connection in localStorage:', pendingConnection ? 'YES' : 'NO')
+
+  if (pendingConnection) {
+    console.log('[HueSetup] Found pending Hue connection, saving to database...')
+    console.log('[HueSetup] User ID:', authStore.user.id)
+
+    try {
+      const hueData = JSON.parse(pendingConnection)
+      console.log('[HueSetup] Parsed hueData:', { ...hueData, access_token: '***', refresh_token: '***' })
+
+      // Check if data is fresh (within 5 minutes)
+      const dataAge = Date.now() - hueData.timestamp
+      console.log('[HueSetup] Data age:', dataAge, 'ms (max 300000)')
+
+      if (dataAge < 300000) {
+        loading.value = true
+        step.value = 2
+
+        // Calculate token expiry
+        const expiresAt = new Date(Date.now() + hueData.expires_in * 1000)
+
+        // Get user's household_id
+        const { data: profileData } = await supabase
+          .from('profiles')
+          .select('household_id')
+          .eq('id', authStore.user.id)
+          .single()
+
+        const householdId = profileData?.household_id
+        console.log('[HueSetup] Household ID:', householdId)
+
+        // New integrations table format
+        const insertData = {
+          user_id: authStore.user.id,
+          household_id: householdId,
+          type: 'hue',
+          name: 'Hue Bridge',
+          config: {
+            access_token: hueData.access_token,
+            refresh_token: hueData.refresh_token,
+            token_expires_at: expiresAt.toISOString(),
+            bridge_username: hueData.bridge_username
+          },
+          status: 'active',
+          last_sync_at: new Date().toISOString()
+        }
+        console.log('[HueSetup] Inserting data to integrations table')
+
+        // Save to Supabase integrations table
+        let saveError = null
+        let savedData = null
+
+        try {
+          // Check if integration already exists
+          const { data: existing } = await supabase
+            .from('integrations')
+            .select('id')
+            .eq('user_id', authStore.user.id)
+            .eq('type', 'hue')
+            .maybeSingle()
+
+          if (existing) {
+            // Update existing
+            console.log('[HueSetup] Updating existing integration:', existing.id)
+            const updateResult = await supabase
+              .from('integrations')
+              .update({
+                config: insertData.config,
+                status: 'active',
+                last_sync_at: insertData.last_sync_at,
+                updated_at: new Date().toISOString()
+              })
+              .eq('id', existing.id)
+              .select()
+
+            savedData = updateResult.data
+            saveError = updateResult.error
+          } else {
+            // Insert new
+            console.log('[HueSetup] Creating new integration')
+            const insertResult = await supabase
+              .from('integrations')
+              .insert(insertData)
+              .select()
+
+            savedData = insertResult.data
+            saveError = insertResult.error
+          }
+        } catch (e) {
+          console.error('[HueSetup] Supabase exception:', e)
+          saveError = { message: e.message }
+        }
+
+        console.log('[HueSetup] Final result - data:', savedData, 'error:', saveError)
+
+        // Remove from localStorage AFTER successful save
+        localStorage.removeItem('hue_pending_connection')
+
+        if (saveError) {
+          console.error('[HueSetup] Save error:', saveError)
+          error.value = 'Kon verbinding niet opslaan: ' + saveError.message
+          step.value = 1
+        } else {
+          console.log('[HueSetup] Successfully saved to database')
+          hueConnection.value = {
+            access_token: hueData.access_token,
+            refresh_token: hueData.refresh_token,
+            bridge_username: hueData.bridge_username
+          }
+          success.value = 'Hue Bridge succesvol gekoppeld!'
+          step.value = 3
+          await loadSensors()
+        }
+
+        loading.value = false
+        return
+      } else {
+        console.log('[HueSetup] Data too old, removing from localStorage')
+        localStorage.removeItem('hue_pending_connection')
+      }
+    } catch (e) {
+      console.error('[HueSetup] Error processing pending connection:', e)
+      localStorage.removeItem('hue_pending_connection')
+    }
+  } else {
+    console.log('[HueSetup] No pending connection, checking existing...')
+  }
+
+  await checkExistingConnection()
 })
 
-// Check for existing Hue connection
+// Check for existing Hue connection in integrations table
 async function checkExistingConnection() {
+  console.log('[HueSetup] checkExistingConnection starting...')
   loading.value = true
 
   try {
     if (!authStore.user?.id) {
+      console.log('[HueSetup] No user ID in checkExistingConnection')
       loading.value = false
+      step.value = 1
       return
     }
 
+    console.log('[HueSetup] Querying integrations for user:', authStore.user.id)
     const { data, error: fetchError } = await supabase
-      .from('hue_connections')
+      .from('integrations')
       .select('*')
       .eq('user_id', authStore.user.id)
-      .single()
+      .eq('type', 'hue')
+      .maybeSingle()
+
+    console.log('[HueSetup] Query result - data:', data, 'error:', fetchError)
 
     if (data && !fetchError) {
-      hueConnection.value = data
+      console.log('[HueSetup] Found existing connection')
+      // Map integrations format to hueConnection format
+      hueConnection.value = {
+        id: data.id,
+        access_token: data.config?.access_token,
+        refresh_token: data.config?.refresh_token,
+        bridge_username: data.config?.bridge_username,
+        token_expires_at: data.config?.token_expires_at
+      }
       step.value = 3
 
       // Check if token needs refresh
-      if (new Date(data.token_expires_at) < new Date()) {
+      if (data.config?.token_expires_at && new Date(data.config.token_expires_at) < new Date()) {
         await refreshToken()
       }
 
       // Load sensors
       await loadSensors()
+    } else {
+      console.log('[HueSetup] No existing connection, showing step 1')
+      step.value = 1
     }
   } catch (e) {
-    console.log('No existing Hue connection or table not found')
+    console.error('[HueSetup] Error in checkExistingConnection:', e)
+    step.value = 1
   } finally {
+    console.log('[HueSetup] checkExistingConnection done, step:', step.value)
     loading.value = false
   }
 }
@@ -104,17 +262,30 @@ async function handleOAuthCallback(code) {
     // Calculate token expiry
     const expiresAt = new Date(Date.now() + tokenData.expires_in * 1000)
 
-    // Save to Supabase
+    // Get user's household_id
+    const { data: profileData } = await supabase
+      .from('profiles')
+      .select('household_id')
+      .eq('id', authStore.user.id)
+      .single()
+
+    // Save to Supabase integrations table
     const { error: saveError } = await supabase
-      .from('hue_connections')
+      .from('integrations')
       .upsert({
         user_id: authStore.user?.id,
-        access_token: tokenData.access_token,
-        refresh_token: tokenData.refresh_token,
-        token_expires_at: expiresAt.toISOString(),
-        bridge_username: username,
-        connected_at: new Date().toISOString()
-      })
+        household_id: profileData?.household_id,
+        type: 'hue',
+        name: 'Hue Bridge',
+        config: {
+          access_token: tokenData.access_token,
+          refresh_token: tokenData.refresh_token,
+          token_expires_at: expiresAt.toISOString(),
+          bridge_username: username
+        },
+        status: 'active',
+        last_sync_at: new Date().toISOString()
+      }, { onConflict: 'user_id,type' })
 
     if (saveError) throw saveError
 
@@ -148,14 +319,20 @@ async function refreshToken() {
 
     const expiresAt = new Date(Date.now() + tokenData.expires_in * 1000)
 
+    // Update in integrations table
     await supabase
-      .from('hue_connections')
+      .from('integrations')
       .update({
-        access_token: tokenData.access_token,
-        refresh_token: tokenData.refresh_token,
-        token_expires_at: expiresAt.toISOString()
+        config: {
+          ...hueConnection.value,
+          access_token: tokenData.access_token,
+          refresh_token: tokenData.refresh_token,
+          token_expires_at: expiresAt.toISOString()
+        },
+        updated_at: new Date().toISOString()
       })
       .eq('user_id', authStore.user?.id)
+      .eq('type', 'hue')
 
     hueConnection.value.access_token = tokenData.access_token
     hueConnection.value.refresh_token = tokenData.refresh_token
@@ -167,17 +344,31 @@ async function refreshToken() {
   }
 }
 
-// Load sensors from Hue Bridge
+// Load sensors from Hue Bridge (motion + contact sensors)
 async function loadSensors() {
   if (!hueConnection.value) return
 
   loading.value = true
 
   try {
-    sensors.value = await hueService.getAllSensorStates(
-      hueConnection.value.access_token,
-      hueConnection.value.bridge_username
-    )
+    // Load both v1 motion sensors and v2 contact sensors
+    const [motionSensors, contactSensors] = await Promise.all([
+      hueService.getAllSensorStates(
+        hueConnection.value.access_token,
+        hueConnection.value.bridge_username
+      ),
+      hueService.getContactSensors(
+        hueConnection.value.access_token,
+        hueConnection.value.bridge_username
+      ).catch(err => {
+        console.warn('[HueSetup] Contact sensors not available:', err)
+        return []
+      })
+    ])
+
+    // Combine both sensor types
+    sensors.value = [...motionSensors, ...contactSensors]
+    console.log('[HueSetup] Loaded sensors:', sensors.value.length, '(motion:', motionSensors.length, ', contact:', contactSensors.length, ')')
   } catch (e) {
     console.error('Failed to load sensors:', e)
     error.value = 'Kon sensoren niet laden'
@@ -186,7 +377,7 @@ async function loadSensors() {
   }
 }
 
-// Sync sensor data to database
+// Sync sensor data to database (rooms + room_events)
 async function syncSensorData() {
   if (!hueConnection.value || sensors.value.length === 0) return
 
@@ -196,20 +387,110 @@ async function syncSensorData() {
   try {
     const now = new Date().toISOString()
 
+    // Get integration ID
+    const { data: integration } = await supabase
+      .from('integrations')
+      .select('id')
+      .eq('user_id', authStore.user?.id)
+      .eq('type', 'hue')
+      .single()
+
+    if (!integration) {
+      throw new Error('Geen Hue integratie gevonden')
+    }
+
+    let roomsCreated = 0
+    let eventsCreated = 0
+
+    // Cache for room IDs
+    const roomCache = new Map()
+
     for (const sensor of sensors.value) {
-      // Save motion event if presence detected
-      if (sensor.presence !== undefined) {
-        await supabase.from('motion_events').insert({
-          user_id: authStore.user?.id,
-          room: sensor.name,
-          motion: sensor.presence,
-          recorded_at: sensor.presenceUpdated || now,
-          source: 'hue'
-        })
+      const roomName = sensor.name
+      console.log(`[Sync] Processing sensor: ${roomName}, type: ${sensor.type || 'motion'}, presence: ${sensor.presence}, presenceUpdated: ${sensor.presenceUpdated}`)
+
+      // 1. Get or create room
+      let roomId = roomCache.get(roomName)
+
+      if (!roomId) {
+        // Try to find existing room
+        const { data: existingRoom } = await supabase
+          .from('rooms')
+          .select('id')
+          .eq('name', roomName)
+          .eq('integration_id', integration.id)
+          .maybeSingle()
+
+        if (existingRoom) {
+          roomId = existingRoom.id
+          console.log(`[Sync] Found existing room: ${roomName} -> ${roomId}`)
+        } else {
+          // Create new room
+          const { data: newRoom, error: createError } = await supabase
+            .from('rooms')
+            .insert({
+              name: roomName,
+              integration_id: integration.id
+            })
+            .select('id')
+            .single()
+
+          if (createError) {
+            console.error(`[Sync] Failed to create room ${roomName}:`, createError)
+            continue
+          }
+
+          roomId = newRoom.id
+          roomsCreated++
+          console.log(`[Sync] Created new room: ${roomName} -> ${roomId}`)
+        }
+
+        roomCache.set(roomName, roomId)
+      }
+
+      if (!roomId) continue
+
+      // 2. Create room_event for motion sensors (always create if sensor has presenceUpdated)
+      if (sensor.presenceUpdated) {
+        console.log(`[Sync] Inserting motion event for ${roomName}, presence: ${sensor.presence}, at: ${sensor.presenceUpdated}`)
+        const { error: eventError } = await supabase
+          .from('room_events')
+          .insert({
+            room_id: roomId,
+            source: 'motion',
+            recorded_at: sensor.presenceUpdated
+          })
+
+        if (eventError) {
+          console.error(`[Sync] Failed to insert motion event for ${roomName}:`, eventError)
+        } else {
+          eventsCreated++
+          console.log(`[Sync] ✓ Motion event created for ${roomName}`)
+        }
+      }
+
+      // 3. Create room_event for contact sensors (door)
+      if (sensor.type === 'contact') {
+        console.log(`[Sync] Inserting door event for ${roomName}, contact: ${sensor.contact_report}, at: ${sensor.lastUpdated || now}`)
+        const { error: eventError } = await supabase
+          .from('room_events')
+          .insert({
+            room_id: roomId,
+            source: 'door',
+            recorded_at: sensor.lastUpdated || now
+          })
+
+        if (eventError) {
+          console.error(`[Sync] Failed to insert door event for ${roomName}:`, eventError)
+        } else {
+          eventsCreated++
+          console.log(`[Sync] ✓ Door event created for ${roomName}`)
+        }
       }
     }
 
-    success.value = `${sensors.value.length} sensoren gesynchroniseerd!`
+    success.value = `${roomsCreated} kamers, ${eventsCreated} events gesynchroniseerd!`
+    console.log(`[Sync] Complete: ${roomsCreated} rooms, ${eventsCreated} events`)
 
     // Reload sensors
     await loadSensors()
@@ -228,10 +509,12 @@ async function disconnect() {
   loading.value = true
 
   try {
+    // Delete from integrations table
     await supabase
-      .from('hue_connections')
+      .from('integrations')
       .delete()
       .eq('user_id', authStore.user?.id)
+      .eq('type', 'hue')
 
     hueConnection.value = null
     sensors.value = []
