@@ -10,6 +10,11 @@ export const useAuthStore = defineStore('auth', () => {
   const profile = ref(null)
   const loading = ref(false)
   const error = ref('')
+  const initialized = ref(false)
+
+  // Promise to wait for initialization
+  let initPromise = null
+  let initResolve = null
 
   // Computed
   const isAuthenticated = computed(() => !!user.value)
@@ -32,18 +37,45 @@ export const useAuthStore = defineStore('auth', () => {
 
   // Fetch user profile from profiles table
   async function fetchProfile(userId) {
-    const { data, error: profileError } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', userId)
-      .single()
+    if (!userId) return null
 
-    if (profileError) {
-      console.error('Error fetching profile:', profileError)
+    try {
+      const { data, error: profileError } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .maybeSingle()
+
+      if (profileError) {
+        return null
+      }
+
+      // If no profile exists, create one
+      if (!data) {
+        const { data: session } = await supabase.auth.getSession()
+        const userEmail = session?.session?.user?.email || ''
+
+        const { data: newProfile, error: createError } = await supabase
+          .from('profiles')
+          .insert({
+            id: userId,
+            email: userEmail,
+            role: 'consumer'
+          })
+          .select()
+          .single()
+
+        if (createError) {
+          return null
+        }
+
+        return newProfile
+      }
+
+      return data
+    } catch (e) {
       return null
     }
-
-    return data
   }
 
   // Actions
@@ -66,6 +98,7 @@ export const useAuthStore = defineStore('auth', () => {
 
       user.value = data.user
       profile.value = await fetchProfile(data.user.id)
+      initialized.value = true
 
       // Redirect based on role
       if (profile.value?.role === 'business') {
@@ -76,7 +109,6 @@ export const useAuthStore = defineStore('auth', () => {
 
       return true
     } catch (e) {
-      console.error('Login error:', e)
       error.value = 'Er is een fout opgetreden'
       return false
     } finally {
@@ -96,7 +128,8 @@ export const useAuthStore = defineStore('auth', () => {
           data: {
             first_name: data.firstName,
             last_name: data.lastName
-          }
+          },
+          emailRedirectTo: `${window.location.origin}/app/dashboard`
         }
       })
 
@@ -105,7 +138,31 @@ export const useAuthStore = defineStore('auth', () => {
         return false
       }
 
-      // Create profile
+      // Create household for new user
+      const householdName = data.firstName
+        ? `${data.firstName}'s Woning`
+        : `Mijn Woning`
+
+      const { data: householdData, error: householdError } = await supabase
+        .from('households')
+        .insert({ name: householdName })
+        .select()
+        .single()
+
+      if (!householdError) {
+        // Add user as admin of the household
+        const { error: memberError } = await supabase
+          .from('household_members')
+          .insert({
+            household_id: householdData.id,
+            user_id: authData.user.id,
+            role: 'admin',
+            accepted_at: new Date().toISOString()
+          })
+
+      }
+
+      // Create profile with household reference
       const { error: profileError } = await supabase
         .from('profiles')
         .insert({
@@ -113,20 +170,17 @@ export const useAuthStore = defineStore('auth', () => {
           email: data.email,
           first_name: data.firstName,
           last_name: data.lastName,
-          role: 'consumer'
+          role: 'consumer',
+          household_id: householdData?.id
         })
-
-      if (profileError) {
-        console.error('Profile creation error:', profileError)
-      }
 
       user.value = authData.user
       profile.value = await fetchProfile(authData.user.id)
+      initialized.value = true
 
       router.push('/app/dashboard')
       return true
     } catch (e) {
-      console.error('Registration error:', e)
       error.value = 'Registratie mislukt'
       return false
     } finally {
@@ -135,22 +189,53 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function logout() {
-    await supabase.auth.signOut()
+    try {
+      if (supabase) {
+        await supabase.auth.signOut()
+      }
+    } catch (e) {
+      // Ignore logout errors
+    }
     user.value = null
     profile.value = null
+    initialized.value = false
     router.push('/login')
   }
 
   async function checkAuth() {
-    const { data: { session } } = await supabase.auth.getSession()
-
-    if (session?.user) {
-      user.value = session.user
-      profile.value = await fetchProfile(session.user.id)
-      return true
+    // Already initialized
+    if (initialized.value) {
+      return !!user.value
     }
 
-    return false
+    // Wait for the init promise if it exists
+    if (initPromise) {
+      await initPromise
+      return !!user.value
+    }
+
+    // Fallback: do our own check
+    try {
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession()
+
+      if (sessionError) {
+        initialized.value = true
+        return false
+      }
+
+      if (session?.user) {
+        user.value = session.user
+        profile.value = await fetchProfile(session.user.id)
+        initialized.value = true
+        return true
+      }
+
+      initialized.value = true
+      return false
+    } catch (e) {
+      initialized.value = true
+      return false
+    }
   }
 
   async function forgotPassword(email) {
@@ -182,16 +267,56 @@ export const useAuthStore = defineStore('auth', () => {
     return profile.value?.role === 'business' ? '/pro/dashboard' : '/app/dashboard'
   }
 
-  // Listen for auth changes
-  supabase?.auth.onAuthStateChange(async (event, session) => {
-    if (event === 'SIGNED_IN' && session?.user) {
-      user.value = session.user
-      profile.value = await fetchProfile(session.user.id)
+  // Initialize auth state from existing session on load
+  // This runs immediately when the store is created
+  initPromise = new Promise((resolve) => {
+    initResolve = resolve
+  })
+
+  // Single unified auth state handler using onAuthStateChange
+  // This is more reliable than getSession() which can have race conditions
+  if (!supabase) {
+    console.error('[Auth] Supabase client not available - cannot initialize auth')
+    initialized.value = true
+    if (initResolve) {
+      initResolve()
+      initResolve = null
+    }
+  } else {
+    supabase.auth.onAuthStateChange(async (event, session) => {
+    // Handle both INITIAL_SESSION and SIGNED_IN for initialization
+    // Some Supabase versions send SIGNED_IN instead of INITIAL_SESSION on page load
+    if (event === 'INITIAL_SESSION' || (event === 'SIGNED_IN' && !initialized.value)) {
+      // First event after page load - contains existing session if any
+      if (session?.user) {
+        user.value = session.user
+        // Fetch profile in background - don't block initialization
+        fetchProfile(session.user.id).then(p => {
+          profile.value = p
+        }).catch(() => {})
+      }
+      initialized.value = true
+      if (initResolve) {
+        initResolve()
+        initResolve = null
+      }
+    } else if (event === 'SIGNED_IN' && session?.user) {
+      // User just signed in (after already initialized)
+      if (!user.value || user.value.id !== session.user.id) {
+        user.value = session.user
+        profile.value = await fetchProfile(session.user.id)
+      }
     } else if (event === 'SIGNED_OUT') {
       user.value = null
       profile.value = null
+      initialized.value = true
+      if (initResolve) {
+        initResolve()
+        initResolve = null
+      }
     }
   })
+  }
 
   return {
     // State
@@ -199,6 +324,7 @@ export const useAuthStore = defineStore('auth', () => {
     profile,
     loading,
     error,
+    initialized,
 
     // Computed
     isAuthenticated,
