@@ -264,67 +264,38 @@ async function syncHueRooms() {
       }
     }
 
-    // Sync room_events (motion events from sensors)
+    // Sync room_events - koppel events aan room via de sensor's room_id
+    // GEEN nieuwe rooms aanmaken voor sensoren!
     let eventsCreated = 0
-    const now = new Date().toISOString()
 
     for (const sensor of hueData.sensors) {
-      // Find the room for this sensor by name
-      const { data: sensorRoom } = await supabase
-        .from('rooms')
-        .select('id')
-        .eq('integration_id', hueIntegration.value.id)
-        .eq('name', sensor.name)
+      // Zoek het item (sensor) dat we net hebben gesync'd
+      const { data: sensorItem } = await supabase
+        .from('items')
+        .select('id, room_id')
+        .eq('hue_unique_id', sensor.id)
         .maybeSingle()
 
-      if (!sensorRoom) {
-        // Try to create room if it doesn't exist
-        const { data: newRoom } = await supabase
-          .from('rooms')
-          .insert({
-            name: sensor.name,
-            household_id: householdId,
-            integration_id: hueIntegration.value.id
-          })
-          .select('id')
-          .single()
-
-        if (newRoom && sensor.presenceUpdated) {
+      // Alleen events aanmaken als de sensor aan een room gekoppeld is
+      if (sensorItem?.room_id) {
+        // Motion event
+        if (sensor.presenceUpdated) {
           const { error: eventError } = await supabase
             .from('room_events')
             .insert({
-              room_id: newRoom.id,
+              room_id: sensorItem.room_id,
               source: 'motion',
               recorded_at: sensor.presenceUpdated
             })
           if (!eventError) eventsCreated++
         }
-      } else if (sensor.presenceUpdated) {
-        // Create motion event
-        const { error: eventError } = await supabase
-          .from('room_events')
-          .insert({
-            room_id: sensorRoom.id,
-            source: 'motion',
-            recorded_at: sensor.presenceUpdated
-          })
-        if (!eventError) eventsCreated++
-      }
 
-      // Handle contact sensors (door events)
-      if (sensor.type === 'contact' && sensor.lastUpdated) {
-        const { data: contactRoom } = await supabase
-          .from('rooms')
-          .select('id')
-          .eq('integration_id', hueIntegration.value.id)
-          .eq('name', sensor.name)
-          .maybeSingle()
-
-        if (contactRoom) {
+        // Contact/door event
+        if (sensor.type === 'contact' && sensor.lastUpdated) {
           const { error: eventError } = await supabase
             .from('room_events')
             .insert({
-              room_id: contactRoom.id,
+              room_id: sensorItem.room_id,
               source: 'door',
               recorded_at: sensor.lastUpdated
             })
