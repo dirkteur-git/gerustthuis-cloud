@@ -1,10 +1,13 @@
 import { createClient } from '@supabase/supabase-js'
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
+// Get environment variables - Vite inlines these at build time
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || ''
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
 
-console.log('[Supabase] URL:', supabaseUrl ? 'configured' : 'MISSING')
-console.log('[Supabase] Key:', supabaseAnonKey ? 'configured' : 'MISSING')
+// Debug: log config status (not the actual values)
+console.log('[Supabase] Initializing...')
+console.log('[Supabase] URL configured:', !!supabaseUrl, supabaseUrl ? `(${supabaseUrl.substring(0, 30)}...)` : '')
+console.log('[Supabase] Key configured:', !!supabaseAnonKey)
 
 let supabase = null
 
@@ -14,6 +17,12 @@ if (supabaseUrl && supabaseAnonKey) {
       auth: {
         persistSession: true,
         autoRefreshToken: true,
+        detectSessionInUrl: true
+      },
+      global: {
+        headers: {
+          'X-Client-Info': 'gerustthuis-web'
+        }
       }
     })
     console.log('[Supabase] Client created successfully')
@@ -22,8 +31,8 @@ if (supabaseUrl && supabaseAnonKey) {
   }
 } else {
   console.error('[Supabase] MISSING CREDENTIALS - App will not work!')
-  console.error('[Supabase] VITE_SUPABASE_URL:', supabaseUrl)
-  console.error('[Supabase] VITE_SUPABASE_ANON_KEY:', supabaseAnonKey ? '[set]' : '[not set]')
+  console.error('[Supabase] Check that VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are set in Vercel environment variables')
+  console.error('[Supabase] These must be set BEFORE the build, not just at runtime')
 }
 
 export { supabase }
