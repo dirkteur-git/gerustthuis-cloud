@@ -71,8 +71,8 @@ const handleSubmit = async () => {
 
       <p class="text-center mt-6 text-gray-600">
         Nog geen account?
-        <RouterLink to="/producten" class="text-primary hover:underline font-medium">
-          Bestel eerst een pakket
+        <RouterLink to="/register" class="text-primary hover:underline font-medium">
+          Registreer hier
         </RouterLink>
       </p>
     </div>
