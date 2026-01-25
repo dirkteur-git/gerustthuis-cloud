@@ -1,161 +1,253 @@
 <script setup>
-import { onMounted, onUnmounted } from 'vue'
-import { useDashboardStore } from '@/stores/dashboard'
-import { Radio, Vibrate, Circle, RefreshCw, ArrowLeft } from 'lucide-vue-next'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { supabase } from '@/services/supabase'
+import { RefreshCw, Activity, Home } from 'lucide-vue-next'
 
-const dashboardStore = useDashboardStore()
+// Data
+const rooms = ref([])
+const events = ref([])
+const loading = ref(true)
+const lastUpdate = ref(null)
 
-const getSensorIcon = (sensor) => {
-  if (sensor.type === 'presence' || sensor.type === 'motion') return Radio
-  if (sensor.type === 'vibration') return Vibrate
-  return Circle
+// Fetch data from Supabase
+const fetchData = async () => {
+  loading.value = true
+
+  try {
+    const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+
+    // Get all rooms
+    const { data: roomsData } = await supabase
+      .from('rooms')
+      .select('id, name')
+
+    if (!roomsData || roomsData.length === 0) {
+      loading.value = false
+      return
+    }
+
+    rooms.value = roomsData
+    const roomMap = new Map(roomsData.map(r => [r.id, r.name]))
+
+    // Get events from last 24h
+    let allEvents = []
+    let offset = 0
+    const batchSize = 1000
+
+    while (true) {
+      const { data: batch } = await supabase
+        .from('room_events')
+        .select('id, room_id, source, recorded_at')
+        .gte('recorded_at', dayAgo)
+        .order('recorded_at', { ascending: false })
+        .range(offset, offset + batchSize - 1)
+
+      if (!batch || batch.length === 0) break
+      allEvents = allEvents.concat(batch)
+      if (batch.length < batchSize) break
+      offset += batchSize
+    }
+
+    // Add room name to events
+    events.value = allEvents.map(e => ({
+      ...e,
+      room: roomMap.get(e.room_id) || 'Onbekend'
+    }))
+
+    lastUpdate.value = new Date()
+    console.log(`[Status] Loaded ${rooms.value.length} rooms, ${events.value.length} events (24h)`)
+  } catch (error) {
+    console.error('Error fetching data:', error)
+  } finally {
+    loading.value = false
+  }
 }
 
-const formatTime = (timestamp) => {
-  if (!timestamp) return '-'
+// Room stats with sparkline data
+const roomStats = computed(() => {
+  const stats = []
+
+  for (const room of rooms.value) {
+    const roomEvents = events.value.filter(e => e.room === room.name)
+
+    // Get last activity
+    const lastEvent = roomEvents[0]
+    const lastActivity = lastEvent ? new Date(lastEvent.recorded_at) : null
+
+    // Generate sparkline data (24 hours, 1 point per hour)
+    const sparkline = generateSparkline(roomEvents)
+
+    // Count today's events
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const todayCount = roomEvents.filter(e => new Date(e.recorded_at) >= today).length
+
+    stats.push({
+      id: room.id,
+      name: room.name,
+      lastActivity,
+      todayCount,
+      totalEvents: roomEvents.length,
+      sparkline
+    })
+  }
+
+  // Sort by last activity (most recent first)
+  return stats.sort((a, b) => {
+    if (!a.lastActivity) return 1
+    if (!b.lastActivity) return -1
+    return b.lastActivity - a.lastActivity
+  })
+})
+
+// Generate sparkline data for a room
+const generateSparkline = (roomEvents) => {
+  const now = new Date()
+  const points = []
+
+  // 24 data points, one per hour going back 24h
+  for (let i = 23; i >= 0; i--) {
+    const hourStart = new Date(now)
+    hourStart.setHours(now.getHours() - i, 0, 0, 0)
+    const hourEnd = new Date(hourStart)
+    hourEnd.setHours(hourEnd.getHours() + 1)
+
+    const count = roomEvents.filter(e => {
+      const t = new Date(e.recorded_at)
+      return t >= hourStart && t < hourEnd
+    }).length
+
+    points.push(count)
+  }
+
+  return points
+}
+
+// Create SVG path for sparkline
+const getSparklinePath = (data) => {
+  if (!data || data.length === 0) return ''
+
+  const max = Math.max(...data, 1)
+  const width = 120
+  const height = 32
+  const padding = 2
+
+  const points = data.map((val, i) => {
+    const x = padding + (i / (data.length - 1)) * (width - padding * 2)
+    const y = height - padding - ((val / max) * (height - padding * 2))
+    return `${x},${y}`
+  })
+
+  return `M ${points.join(' L ')}`
+}
+
+// Format time ago
+const formatTimeAgo = (timestamp) => {
+  if (!timestamp) return 'Geen activiteit'
   const diff = Date.now() - new Date(timestamp).getTime()
   if (diff < 60000) return 'Nu'
-  if (diff < 3600000) return `${Math.floor(diff / 60000)}m geleden`
-  if (diff < 86400000) return `${Math.floor(diff / 3600000)}u geleden`
-  return `${Math.floor(diff / 86400000)}d geleden`
+  if (diff < 3600000) return `${Math.floor(diff / 60000)} min geleden`
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)} uur geleden`
+  return `${Math.floor(diff / 86400000)} dagen geleden`
 }
 
-const isRecent = (timestamp, minutes = 30) => {
+// Format last update time
+const formatLastUpdate = () => {
+  if (!lastUpdate.value) return ''
+  return lastUpdate.value.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+// Check if recent activity
+const isRecent = (timestamp) => {
   if (!timestamp) return false
-  return Date.now() - new Date(timestamp).getTime() < minutes * 60 * 1000
+  return Date.now() - timestamp.getTime() < 30 * 60 * 1000 // 30 minutes
 }
 
+// Auto refresh
 let refreshInterval
-onMounted(() => {
-  dashboardStore.fetchDashboardData()
-  refreshInterval = setInterval(() => dashboardStore.fetchDashboardData(), 10000)
+onMounted(async () => {
+  await fetchData()
+  refreshInterval = setInterval(fetchData, 30000)
 })
 
 onUnmounted(() => {
-  clearInterval(refreshInterval)
+  if (refreshInterval) clearInterval(refreshInterval)
 })
 </script>
 
 <template>
-  <div class="min-h-screen bg-gray-50">
+  <div class="p-6 max-w-7xl mx-auto">
     <!-- Header -->
-    <div class="bg-white border-b border-gray-200">
-      <div class="max-w-6xl mx-auto px-6 py-4">
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-4">
-            <router-link to="/" class="p-2 text-gray-500 hover:text-gray-900 rounded-lg hover:bg-gray-100 transition-colors">
-              <ArrowLeft class="w-5 h-5" />
-            </router-link>
-            <div>
-              <h1 class="text-xl font-semibold text-gray-900">Live Status</h1>
-              <p class="text-sm text-gray-500">{{ dashboardStore.sensors.length }} sensoren actief</p>
-            </div>
-          </div>
-          <button
-            @click="dashboardStore.fetchDashboardData"
-            class="flex items-center gap-2 px-3 py-2 text-sm text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
-          >
-            <RefreshCw class="w-4 h-4" :class="{ 'animate-spin': dashboardStore.loading }" />
-            <span v-if="dashboardStore.lastUpdate">{{ formatTime(dashboardStore.lastUpdate) }}</span>
-          </button>
+    <div class="flex items-center justify-between mb-8">
+      <div>
+        <h1 class="text-2xl font-bold text-gray-900">Status</h1>
+        <p class="text-gray-500">Kamer activiteit - laatste 24 uur</p>
+      </div>
+      <div class="flex items-center gap-4">
+        <div v-if="lastUpdate" class="text-sm text-gray-500">
+          Laatste refresh: {{ formatLastUpdate() }}
         </div>
+        <button
+          @click="fetchData"
+          class="flex items-center gap-2 px-4 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg"
+        >
+          <RefreshCw class="w-4 h-4" :class="{ 'animate-spin': loading }" />
+        </button>
       </div>
     </div>
 
-    <div class="max-w-6xl mx-auto px-6 py-8">
-      <!-- Status Banner -->
+    <!-- Room Cards Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
       <div
-        class="rounded-xl p-6 mb-8 border shadow-sm"
-        :class="[
-          dashboardStore.status.level === 'normal'
-            ? 'bg-emerald-50 border-emerald-200'
-            : 'bg-amber-50 border-amber-200'
-        ]"
+        v-for="room in roomStats"
+        :key="room.id"
+        class="bg-white rounded-xl border border-gray-200 p-5 hover:shadow-md transition-shadow"
       >
-        <div class="flex items-center gap-4">
-          <div
-            class="w-12 h-12 rounded-xl flex items-center justify-center"
-            :class="dashboardStore.status.level === 'normal' ? 'bg-emerald-100' : 'bg-amber-100'"
-          >
+        <div class="flex items-start justify-between mb-4">
+          <div class="flex items-center gap-3">
             <div
-              class="w-3 h-3 rounded-full"
-              :class="dashboardStore.status.level === 'normal' ? 'bg-emerald-500' : 'bg-amber-500'"
+              class="w-10 h-10 rounded-lg flex items-center justify-center"
+              :class="isRecent(room.lastActivity) ? 'bg-emerald-100' : 'bg-gray-100'"
+            >
+              <Home
+                class="w-5 h-5"
+                :class="isRecent(room.lastActivity) ? 'text-emerald-600' : 'text-gray-400'"
+              />
+            </div>
+            <div>
+              <h3 class="font-semibold text-gray-900">{{ room.name }}</h3>
+              <p class="text-sm text-gray-500">{{ formatTimeAgo(room.lastActivity) }}</p>
+            </div>
+          </div>
+          <div class="text-right">
+            <p class="text-lg font-bold text-gray-900">{{ room.todayCount }}</p>
+            <p class="text-xs text-gray-400">vandaag</p>
+          </div>
+        </div>
+
+        <!-- Mini Sparkline -->
+        <div class="h-8 w-full">
+          <svg width="100%" height="32" viewBox="0 0 120 32" preserveAspectRatio="none">
+            <path
+              :d="getSparklinePath(room.sparkline)"
+              fill="none"
+              :stroke="isRecent(room.lastActivity) ? '#10b981' : '#9ca3af'"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
             />
-          </div>
-          <div>
-            <h2 class="text-lg font-semibold text-gray-900">{{ dashboardStore.status.message }}</h2>
-            <p class="text-sm text-gray-600">
-              Laatste activiteit: {{ dashboardStore.status.lastActivityLocation }}
-              <span v-if="dashboardStore.status.lastActivity">
-                ({{ formatTime(dashboardStore.status.lastActivity) }})
-              </span>
-            </p>
-          </div>
+          </svg>
         </div>
+
+        <p class="text-xs text-gray-400 text-center mt-1">24 uur activiteit</p>
       </div>
+    </div>
 
-      <!-- Sensors Grid -->
-      <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-        <div
-          v-for="sensor in dashboardStore.sensors"
-          :key="sensor.id"
-          class="bg-white rounded-xl p-6 border border-gray-200 shadow-sm"
-        >
-          <div class="flex items-start justify-between mb-4">
-            <div class="flex items-center gap-3">
-              <div
-                class="w-12 h-12 rounded-xl flex items-center justify-center"
-                :class="isRecent(sensor.lastActivity) ? 'bg-emerald-100' : 'bg-gray-100'"
-              >
-                <component
-                  :is="getSensorIcon(sensor)"
-                  class="w-6 h-6"
-                  :class="isRecent(sensor.lastActivity) ? 'text-emerald-600' : 'text-gray-400'"
-                />
-              </div>
-              <div>
-                <h3 class="font-semibold text-gray-900">{{ sensor.name }}</h3>
-                <p class="text-sm text-gray-500">{{ sensor.type }}</p>
-              </div>
-            </div>
-            <span
-              class="text-xs px-2 py-1 rounded-full font-medium"
-              :class="isRecent(sensor.lastActivity) ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'"
-            >
-              {{ isRecent(sensor.lastActivity) ? 'Online' : 'Offline' }}
-            </span>
-          </div>
-
-          <!-- Capabilities -->
-          <div class="space-y-2">
-            <div
-              v-for="(value, cap) in sensor.capabilities"
-              :key="cap"
-              class="flex items-center justify-between py-2 border-t border-gray-100"
-            >
-              <span class="text-sm text-gray-500 capitalize">{{ cap }}</span>
-              <span class="text-sm text-gray-900 font-medium">
-                {{ typeof value === 'boolean' ? (value ? 'Ja' : 'Nee') : value }}
-              </span>
-            </div>
-          </div>
-
-          <!-- Battery & Last Activity -->
-          <div class="flex items-center justify-between mt-4 pt-4 border-t border-gray-100">
-            <span v-if="sensor.battery !== null" class="text-sm text-gray-500">
-              Batterij: {{ sensor.battery }}%
-            </span>
-            <span class="text-sm text-gray-400">{{ formatTime(sensor.lastActivity) }}</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Empty State -->
-      <div v-if="dashboardStore.sensors.length === 0 && !dashboardStore.loading" class="text-center py-16">
-        <Circle class="w-12 h-12 text-gray-300 mx-auto mb-4" />
-        <h3 class="text-lg font-medium text-gray-900 mb-2">Geen sensoren gevonden</h3>
-        <p class="text-gray-500">Wachtend op sensor data van de hub...</p>
-      </div>
+    <!-- Empty State -->
+    <div v-if="roomStats.length === 0 && !loading" class="text-center py-16">
+      <Activity class="w-12 h-12 text-gray-300 mx-auto mb-4" />
+      <h3 class="text-lg font-medium text-gray-900 mb-2">Geen kamers gevonden</h3>
+      <p class="text-gray-500">Er zijn nog geen kamers met activiteit.</p>
     </div>
   </div>
 </template>

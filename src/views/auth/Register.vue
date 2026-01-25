@@ -37,7 +37,8 @@ const handleSubmit = async () => {
   const success = await authStore.register({
     firstName: form.value.firstName,
     lastName: form.value.lastName,
-    email: form.value.email
+    email: form.value.email,
+    password: form.value.password
   })
 
   if (success) {

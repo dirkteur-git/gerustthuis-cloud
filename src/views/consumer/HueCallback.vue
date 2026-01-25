@@ -1,21 +1,29 @@
 <script setup>
+console.log('[HueCallback] Script setup starting...')
+
 import { onMounted, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { RefreshCw, AlertCircle } from 'lucide-vue-next'
+import hueService from '@/services/hue'
+import { RefreshCw, AlertCircle, CheckCircle } from 'lucide-vue-next'
 
-const route = useRoute()
-const router = useRouter()
+console.log('[HueCallback] Imports done')
+
 const error = ref('')
+const status = ref('Initialiseren...')
+const success = ref(false)
 
-onMounted(() => {
-  console.log('HueCallback mounted, query:', route.query)
+console.log('[HueCallback] Refs initialized')
 
-  const code = route.query.code
-  const state = route.query.state
-  const errorParam = route.query.error
+onMounted(async () => {
+  console.log('[HueCallback] onMounted called')
+  const urlParams = new URLSearchParams(window.location.search)
+  const code = urlParams.get('code')
+  const errorParam = urlParams.get('error')
+
+  console.log('HueCallback - URL:', window.location.href)
+  console.log('HueCallback - Code:', code)
 
   if (errorParam) {
-    error.value = `Hue authenticatie geweigerd: ${route.query.error_description || errorParam}`
+    error.value = `Hue authenticatie geweigerd: ${urlParams.get('error_description') || errorParam}`
     return
   }
 
@@ -24,16 +32,43 @@ onMounted(() => {
     return
   }
 
-  // Store the code and state in localStorage for the HueSetup page to process
-  localStorage.setItem('hue_oauth_code', code)
-  if (state) {
-    localStorage.setItem('hue_oauth_callback_state', state)
+  status.value = 'Token ophalen van Hue...'
+
+  try {
+    // Exchange code for token
+    console.log('Exchanging code for token...')
+    const tokenData = await hueService.exchangeCodeForToken(code)
+    console.log('Token received:', tokenData)
+
+    status.value = 'Bridge koppelen...'
+
+    // Link bridge and get username
+    const username = await hueService.linkBridge(tokenData.access_token)
+    console.log('Bridge username:', username)
+
+    // Store in localStorage temporarily - will be saved to DB on the protected page
+    const hueData = {
+      access_token: tokenData.access_token,
+      refresh_token: tokenData.refresh_token,
+      expires_in: tokenData.expires_in,
+      bridge_username: username,
+      timestamp: Date.now()
+    }
+    localStorage.setItem('hue_pending_connection', JSON.stringify(hueData))
+    console.log('Hue data saved to localStorage')
+
+    status.value = 'Hue Bridge gekoppeld!'
+    success.value = true
+
+    // Redirect to Hue page which will save to DB
+    setTimeout(() => {
+      window.location.href = '/app/hue'
+    }, 1000)
+
+  } catch (e) {
+    console.error('OAuth callback error:', e)
+    error.value = 'Kon niet verbinden met Hue Bridge: ' + e.message
   }
-
-  console.log('Stored OAuth code, redirecting to /app/hue')
-
-  // Redirect to the Hue setup page which will process the code
-  router.replace('/app/hue')
 })
 </script>
 
@@ -51,10 +86,15 @@ onMounted(() => {
           Opnieuw proberen
         </a>
       </div>
+      <div v-else-if="success">
+        <CheckCircle class="w-12 h-12 text-green-500 mx-auto mb-4" />
+        <h2 class="text-xl font-semibold text-gray-900 mb-2">Gelukt!</h2>
+        <p class="text-gray-500">{{ status }}</p>
+      </div>
       <div v-else>
         <RefreshCw class="w-12 h-12 text-amber-500 animate-spin mx-auto mb-4" />
         <h2 class="text-xl font-semibold text-gray-900 mb-2">Verbinden met Hue...</h2>
-        <p class="text-gray-500">Even geduld, je wordt doorgestuurd</p>
+        <p class="text-gray-500">{{ status }}</p>
       </div>
     </div>
   </div>

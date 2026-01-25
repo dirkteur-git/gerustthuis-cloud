@@ -58,29 +58,24 @@ const routes = [
         component: () => import('@/views/consumer/Status.vue')
       },
       {
-        path: 'alerts',
-        name: 'consumer-alerts',
-        component: () => import('@/views/consumer/Alerts.vue')
+        path: 'patronen',
+        name: 'consumer-patronen',
+        component: () => import('@/views/consumer/Patronen.vue')
       },
       {
-        path: 'dagboek',
-        name: 'consumer-dagboek',
-        component: () => import('@/views/consumer/Dagboek.vue')
-      },
-      {
-        path: 'sensoren',
-        name: 'consumer-sensoren',
-        component: () => import('@/views/consumer/Sensoren.vue')
-      },
-      {
-        path: 'familie',
-        name: 'consumer-familie',
-        component: () => import('@/views/consumer/Familie.vue')
+        path: 'woning',
+        name: 'consumer-woning',
+        component: () => import('@/views/consumer/Woning.vue')
       },
       {
         path: 'instellingen',
         name: 'consumer-instellingen',
         component: () => import('@/views/consumer/Instellingen.vue')
+      },
+      {
+        path: 'integraties',
+        name: 'consumer-integraties',
+        component: () => import('@/views/consumer/Integraties.vue')
       },
       {
         path: 'hue',
@@ -142,53 +137,9 @@ const routes = [
     ]
   },
 
-  // Hub routes (development/internal - auth required)
-  {
-    path: '/hub',
-    meta: { requiresAuth: true },
-    children: [
-      {
-        path: '',
-        name: 'hub',
-        component: () => import('@/views/hub/StartHub.vue')
-      },
-      {
-        path: 'business-case',
-        name: 'hub-business-case',
-        component: () => import('@/views/hub/BusinessCase.vue')
-      },
-      {
-        path: 'roadmap',
-        name: 'hub-roadmap',
-        component: () => import('@/views/hub/Roadmap.vue')
-      },
-      {
-        path: 'plattegrond',
-        name: 'hub-floorplan',
-        component: () => import('@/views/hub/FloorPlan.vue')
-      },
-      {
-        path: 'weekoverzicht',
-        name: 'hub-weekoverzicht',
-        component: () => import('@/views/hub/Weekoverzicht.vue')
-      },
-      {
-        path: 'architectuur',
-        name: 'hub-architectuur',
-        component: () => import('@/views/hub/Architectuur.vue')
-      },
-      {
-        path: 'sensor-data',
-        name: 'hub-sensor-data',
-        component: () => import('@/views/hub/SensorData.vue')
-      }
-    ]
-  },
-
   // Legacy redirects for backwards compatibility
   { path: '/dashboard', redirect: '/app/dashboard' },
   { path: '/status', redirect: '/app/status' },
-  { path: '/alerts', redirect: '/app/alerts' },
   { path: '/kamers', redirect: '/pro/kamers' },
   { path: '/bewoners', redirect: '/pro/bewoners' },
   { path: '/meldingen', redirect: '/pro/meldingen' },
@@ -212,41 +163,25 @@ const router = createRouter({
   }
 })
 
-// Navigation guard
+// Navigation guard - Authentication check
 router.beforeEach(async (to, from, next) => {
   const authStore = useAuthStore()
 
-  // Check auth on initial load
-  if (!authStore.isAuthenticated) {
+  // Wait for auth to initialize
+  if (!authStore.initialized) {
     await authStore.checkAuth()
   }
 
-  // Guest-only routes (login, register)
-  if (to.meta.requiresGuest && authStore.isAuthenticated) {
-    return next(authStore.getRedirectPath())
+  const requiresAuth = to.matched.some(record => record.meta.requiresAuth)
+  const requiresGuest = to.matched.some(record => record.meta.requiresGuest)
+
+  if (requiresAuth && !authStore.isAuthenticated) {
+    next('/login')
+  } else if (requiresGuest && authStore.isAuthenticated) {
+    next(authStore.getRedirectPath())
+  } else {
+    next()
   }
-
-  // Protected routes
-  if (to.meta.requiresAuth && !authStore.isAuthenticated) {
-    return next({ name: 'login', query: { redirect: to.fullPath } })
-  }
-
-  // Role-based access
-  if (to.meta.role && authStore.isAuthenticated) {
-    const userRole = authStore.role
-
-    // Consumer trying to access business routes
-    if (to.meta.role === 'business' && userRole !== 'business') {
-      return next('/app/dashboard')
-    }
-
-    // Business trying to access consumer routes
-    if (to.meta.role === 'consumer' && userRole === 'business') {
-      return next('/pro/dashboard')
-    }
-  }
-
-  next()
 })
 
 export default router

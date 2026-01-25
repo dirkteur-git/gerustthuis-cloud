@@ -5,10 +5,69 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="GerustThuis Dashboard - Monitor het welzijn van uw dierbaren" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <title>GerustThuis Dashboard</title>
+    <style>
+      #app-loading {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        font-family: system-ui, sans-serif;
+        color: #666;
+        gap: 12px;
+      }
+      #app-loading.hidden { display: none; }
+      #app-loading .spinner {
+        width: 32px;
+        height: 32px;
+        border: 3px solid #e5e7eb;
+        border-top-color: #1B5E3B;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      #app-loading .error { color: #dc2626; }
+      #app-loading button {
+        padding: 8px 16px;
+        background: #3b82f6;
+        color: white;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        margin-top: 8px;
+      }
+    </style>
   </head>
   <body>
+    <div id="app-loading">
+      <div class="spinner"></div>
+      <span>GerustThuis laden...</span>
+    </div>
     <div id="app"></div>
+    <script>
+      // Timeout - show error if app doesn't load within 10 seconds
+      window.__loadTimeout = setTimeout(function() {
+        var loader = document.getElementById('app-loading');
+        if (loader && !loader.classList.contains('hidden')) {
+          loader.innerHTML = '<p class="error">De app laadt niet. Controleer de browser console (F12).</p><button onclick="location.reload(true)">Opnieuw proberen</button>';
+        }
+      }, 10000);
+
+      // Global error handler - catch module load errors
+      window.onerror = function(msg, url, line, col, error) {
+        console.error('Global error:', msg, url, line, error);
+        clearTimeout(window.__loadTimeout);
+        var loader = document.getElementById('app-loading');
+        if (loader) {
+          loader.innerHTML = '<p class="error">Fout: ' + msg + '</p><p style="font-size:12px;color:#666;">Check console (F12) voor details</p><button onclick="location.reload(true)">Opnieuw proberen</button>';
+        }
+        return false;
+      };
+    </script>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

@@ -1,16 +1,22 @@
 <script setup>
 import { RouterView } from 'vue-router'
 import { ref } from 'vue'
-import { Menu, Bell } from 'lucide-vue-next'
+import { Menu, Bell, LogOut } from 'lucide-vue-next'
 import ConsumerSidebar from './ConsumerSidebar.vue'
 import { useAuthStore } from '@/stores/auth'
 import Avatar from '@/components/ui/Avatar.vue'
 
 const authStore = useAuthStore()
 const isSidebarOpen = ref(false)
+const showUserMenu = ref(false)
 
 const toggleSidebar = () => {
   isSidebarOpen.value = !isSidebarOpen.value
+}
+
+const handleLogout = async () => {
+  showUserMenu.value = false
+  await authStore.logout()
 }
 </script>
 
@@ -75,17 +81,52 @@ const toggleSidebar = () => {
           </button>
 
           <!-- User Menu -->
-          <div class="flex items-center gap-3">
-            <Avatar :initials="authStore.userInitials" size="sm" />
-            <div class="hidden sm:block">
-              <p class="text-sm font-medium text-gray-900">
-                {{ authStore.user?.firstName }} {{ authStore.user?.lastName }}
-              </p>
-              <p class="text-xs text-gray-500">
-                {{ authStore.user?.email }}
-              </p>
-            </div>
+          <div class="relative">
+            <button
+              @click="showUserMenu = !showUserMenu"
+              class="flex items-center gap-3 p-1 rounded-lg hover:bg-gray-100 transition-colors"
+            >
+              <Avatar :initials="authStore.userInitials" size="sm" />
+              <div class="hidden sm:block text-left">
+                <p class="text-sm font-medium text-gray-900">
+                  {{ authStore.profile?.first_name }} {{ authStore.profile?.last_name }}
+                </p>
+                <p class="text-xs text-gray-500">
+                  {{ authStore.user?.email }}
+                </p>
+              </div>
+            </button>
+
+            <!-- Dropdown Menu -->
+            <Transition
+              enter-active-class="transition ease-out duration-100"
+              enter-from-class="transform opacity-0 scale-95"
+              enter-to-class="transform opacity-100 scale-100"
+              leave-active-class="transition ease-in duration-75"
+              leave-from-class="transform opacity-100 scale-100"
+              leave-to-class="transform opacity-0 scale-95"
+            >
+              <div
+                v-if="showUserMenu"
+                class="absolute right-0 mt-2 w-48 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50"
+              >
+                <button
+                  @click="handleLogout"
+                  class="w-full flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"
+                >
+                  <LogOut class="w-4 h-4" />
+                  Uitloggen
+                </button>
+              </div>
+            </Transition>
           </div>
+
+          <!-- Click outside to close menu -->
+          <div
+            v-if="showUserMenu"
+            class="fixed inset-0 z-40"
+            @click="showUserMenu = false"
+          />
         </div>
       </header>
 

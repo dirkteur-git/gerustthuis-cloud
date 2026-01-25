@@ -1,248 +1,270 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { supabase } from '@/services/supabase'
-import { useAuthStore } from '@/stores/auth'
 import {
   RefreshCw,
   Activity,
   Clock,
   Eye,
   DoorOpen,
-  Thermometer,
-  Droplets,
-  Radio,
-  ChevronDown,
-  ChevronUp,
-  Table
+  Lightbulb,
+  TrendingUp,
+  Wifi,
+  Filter
 } from 'lucide-vue-next'
 
-const authStore = useAuthStore()
+const router = useRouter()
 
 // Data
-const motionEvents = ref([])
-const doorEvents = ref([])
-const allSensorReadings = ref([])
+const rooms = ref([])
+const events = ref([])
 const loading = ref(true)
 const lastUpdate = ref(null)
-const expandedSensor = ref(null)
+const checkNuResult = ref(null)
+const selectedRooms = ref([])
+const showRoomFilter = ref(false)
 
-// Fetch data from Supabase - filtered by user_id
+// Fetch check_nu for pattern score
+const fetchCheckNu = async () => {
+  try {
+    const { data, error } = await supabase.rpc('check_nu')
+    if (error) throw error
+    checkNuResult.value = data
+  } catch (error) {
+    console.error('Error fetching check_nu:', error)
+  }
+}
+
+// Fetch data from Supabase
 const fetchData = async () => {
   loading.value = true
 
   try {
-    const userId = authStore.user?.id
-    if (!userId) {
+    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+
+    // Get all rooms
+    const { data: roomsData } = await supabase
+      .from('rooms')
+      .select('id, name')
+
+    if (!roomsData || roomsData.length === 0) {
       loading.value = false
       return
     }
 
-    // Get data from last 7 days for weekly heatmap
-    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+    rooms.value = roomsData
+    // Initialize selected rooms with all rooms
+    if (selectedRooms.value.length === 0) {
+      selectedRooms.value = roomsData.map(r => r.name)
+    }
+    const roomMap = new Map(roomsData.map(r => [r.id, r.name]))
 
-    const [motionRes, doorRes, readingsRes] = await Promise.all([
-      supabase
-        .from('motion_events')
-        .select('*')
-        .eq('user_id', userId)
+    // Get events with pagination
+    let allEvents = []
+    let offset = 0
+    const batchSize = 1000
+
+    while (true) {
+      const { data: batch } = await supabase
+        .from('room_events')
+        .select('id, room_id, source, recorded_at')
         .gte('recorded_at', weekAgo)
         .order('recorded_at', { ascending: false })
-        .limit(2000),
-      supabase
-        .from('door_events')
-        .select('*')
-        .eq('user_id', userId)
-        .gte('recorded_at', weekAgo)
-        .order('recorded_at', { ascending: false })
-        .limit(1000),
-      supabase
-        .from('sensor_readings')
-        .select('*')
-        .eq('user_id', userId)
-        .gte('recorded_at', weekAgo)
-        .order('recorded_at', { ascending: false })
-        .limit(1000)
-    ])
+        .range(offset, offset + batchSize - 1)
 
-    if (motionRes.data) motionEvents.value = motionRes.data
-    if (doorRes.data) doorEvents.value = doorRes.data
-    if (readingsRes.data) allSensorReadings.value = readingsRes.data
+      if (!batch || batch.length === 0) break
+      allEvents = allEvents.concat(batch)
+      if (batch.length < batchSize) break
+      offset += batchSize
+    }
 
+    // Add room name to events
+    events.value = allEvents.map(e => ({
+      ...e,
+      room: roomMap.get(e.room_id) || 'Onbekend'
+    }))
+
+    lastUpdate.value = new Date()
+    console.log(`[Dashboard] Loaded ${rooms.value.length} rooms, ${events.value.length} events`)
+
+    // Also fetch check_nu
+    await fetchCheckNu()
   } catch (error) {
     console.error('Error fetching data:', error)
+  } finally {
+    loading.value = false
   }
-
-  lastUpdate.value = new Date()
-  loading.value = false
 }
 
-// Calculate motion duration by pairing motion=true with next motion=false
-const calculateMotionDurations = (events, room) => {
-  // Filter events for this room and sort by time ascending
-  const roomEvents = events
-    .filter(e => e.room === room)
-    .sort((a, b) => new Date(a.recorded_at) - new Date(b.recorded_at))
+// Today's stats
+const todayStats = computed(() => {
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
 
-  const durations = []
+  const todayEvents = events.value.filter(e => new Date(e.recorded_at) >= today)
 
-  for (let i = 0; i < roomEvents.length; i++) {
-    const event = roomEvents[i]
-    if (event.motion) {
-      // Find the next "no motion" event
-      let endTime = null
-      for (let j = i + 1; j < roomEvents.length; j++) {
-        if (!roomEvents[j].motion) {
-          endTime = new Date(roomEvents[j].recorded_at)
-          break
-        }
-      }
-
-      const startTime = new Date(event.recorded_at)
-      let duration = null
-      let durationDisplay = '-'
-
-      if (endTime) {
-        duration = endTime - startTime
-        if (duration < 60000) {
-          durationDisplay = `${Math.round(duration / 1000)}s`
-        } else if (duration < 3600000) {
-          durationDisplay = `${Math.round(duration / 60000)}m`
-        } else {
-          durationDisplay = `${Math.round(duration / 3600000)}u`
-        }
-      }
-
-      durations.push({
-        timestamp: event.recorded_at,
-        duration,
-        durationDisplay
-      })
-    }
+  return {
+    total: todayEvents.length,
+    motion: todayEvents.filter(e => e.source === 'motion').length,
+    light: todayEvents.filter(e => e.source === 'light').length,
+    door: todayEvents.filter(e => e.source === 'door').length
   }
-
-  // Return in descending order (newest first)
-  return durations.reverse()
-}
-
-// Unique sensors list (excluding temperature/alive sensors)
-const sensors = computed(() => {
-  const sensorMap = new Map()
-
-  // Get unique rooms from motion events
-  const motionRooms = new Set(motionEvents.value.map(e => e.room))
-
-  // Motion sensors - only show motion events with duration
-  for (const room of motionRooms) {
-    const key = `motion_${room}`
-    const durations = calculateMotionDurations(motionEvents.value, room)
-
-    sensorMap.set(key, {
-      id: key,
-      type: 'motion',
-      name: room,
-      icon: Eye,
-      events: durations
-    })
-  }
-
-  // Door sensors - show open/close with duration
-  const doorRooms = new Set(doorEvents.value.map(e => e.room))
-
-  for (const room of doorRooms) {
-    const key = `door_${room}`
-    const roomDoorEvents = doorEvents.value
-      .filter(e => e.room === room)
-      .sort((a, b) => new Date(a.recorded_at) - new Date(b.recorded_at))
-
-    const events = []
-
-    for (let i = 0; i < roomDoorEvents.length; i++) {
-      const event = roomDoorEvents[i]
-      // contact = false means door opened
-      if (!event.contact) {
-        // Find next close event
-        let endTime = null
-        for (let j = i + 1; j < roomDoorEvents.length; j++) {
-          if (roomDoorEvents[j].contact) {
-            endTime = new Date(roomDoorEvents[j].recorded_at)
-            break
-          }
-        }
-
-        const startTime = new Date(event.recorded_at)
-        let duration = null
-        let durationDisplay = '-'
-
-        if (endTime) {
-          duration = endTime - startTime
-          if (duration < 60000) {
-            durationDisplay = `${Math.round(duration / 1000)}s`
-          } else if (duration < 3600000) {
-            durationDisplay = `${Math.round(duration / 60000)}m`
-          } else {
-            durationDisplay = `${Math.round(duration / 3600000)}u`
-          }
-        }
-
-        events.push({
-          timestamp: event.recorded_at,
-          duration,
-          durationDisplay,
-          display: 'Geopend'
-        })
-      }
-    }
-
-    sensorMap.set(key, {
-      id: key,
-      type: 'door',
-      name: room,
-      icon: DoorOpen,
-      events: events.reverse()
-    })
-  }
-
-  return Array.from(sensorMap.values())
 })
 
-// Week heatmap data: days (y) x hours (x)
+// Pattern score computed from check_nu
+const patternScore = computed(() => {
+  if (!checkNuResult.value) return { score: 100, level: 'ok', label: 'Normaal' }
+
+  const maxZ = checkNuResult.value.max_z_score || 0
+  const score = Math.max(0, Math.round(100 - (maxZ * 33)))
+
+  let level = 'ok'
+  let label = 'Normaal'
+  if (score < 70) { level = 'let_op'; label = 'Let op' }
+  if (score < 40) { level = 'zorg'; label = 'Aandacht' }
+
+  return { score, level, label }
+})
+
+// Sensor score - based on alive check (last event within 90 minutes per room)
+const sensorScore = computed(() => {
+  const now = new Date()
+  const aliveThreshold = 90 * 60 * 1000 // 90 minuten in milliseconden
+
+  // Check per kamer of er recent een event is geweest
+  const roomStatus = rooms.value.map(room => {
+    const roomEvents = events.value.filter(e => e.room === room.name)
+    if (roomEvents.length === 0) return { room: room.name, alive: false }
+
+    const lastEvent = new Date(roomEvents[0].recorded_at) // events zijn gesorteerd op tijd (nieuwste eerst)
+    const timeSinceLastEvent = now.getTime() - lastEvent.getTime()
+
+    return {
+      room: room.name,
+      alive: timeSinceLastEvent <= aliveThreshold,
+      lastEvent
+    }
+  })
+
+  const totalRooms = rooms.value.length
+  const healthyCount = roomStatus.filter(r => r.alive).length
+  const score = totalRooms > 0 ? Math.round((healthyCount / totalRooms) * 100) : 100
+
+  return {
+    score,
+    healthy: healthyCount,
+    total: totalRooms,
+    level: score >= 80 ? 'ok' : score >= 50 ? 'let_op' : 'zorg',
+    roomStatus // voor debugging/details
+  }
+})
+
+// Toggle room filter
+const toggleRoomFilter = (roomName) => {
+  const idx = selectedRooms.value.indexOf(roomName)
+  if (idx >= 0) {
+    selectedRooms.value.splice(idx, 1)
+  } else {
+    selectedRooms.value.push(roomName)
+  }
+}
+
+const selectAllRooms = () => {
+  selectedRooms.value = rooms.value.map(r => r.name)
+}
+
+const deselectAllRooms = () => {
+  selectedRooms.value = []
+}
+
+// Filtered events for heatmap
+const filteredEvents = computed(() => {
+  if (selectedRooms.value.length === 0) return []
+  return events.value.filter(e => selectedRooms.value.includes(e.room))
+})
+
+// Last activity
+const lastActivity = computed(() => {
+  if (events.value.length === 0) return { time: null, room: '-', source: '' }
+  const last = events.value[0]
+  return {
+    time: new Date(last.recorded_at),
+    room: last.room,
+    source: last.source
+  }
+})
+
+
+// Week heatmap - uses filtered events
 const weekHeatmap = computed(() => {
   const dayNames = ['Zo', 'Ma', 'Di', 'Wo', 'Do', 'Vr', 'Za']
   const heatmap = []
+  const now = new Date()
 
-  // Initialize grid: 7 days x 24 hours
-  for (let day = 0; day < 7; day++) {
+  for (let daysAgo = 6; daysAgo >= 0; daysAgo--) {
+    const date = new Date(now)
+    date.setDate(date.getDate() - daysAgo)
+    date.setHours(0, 0, 0, 0)
+
     const dayData = {
-      name: dayNames[day],
-      hours: []
-    }
-    for (let hour = 0; hour < 24; hour++) {
-      dayData.hours.push({ hour, count: 0 })
+      name: dayNames[date.getDay()],
+      date: date,
+      dateStr: date.toLocaleDateString('nl-NL', { day: '2-digit', month: '2-digit' }),
+      hours: Array.from({ length: 24 }, (_, i) => ({ hour: i, count: 0, events: [] }))
     }
     heatmap.push(dayData)
   }
 
-  // Count motion events per day/hour
-  for (const event of motionEvents.value) {
-    if (!event.motion) continue
-    const date = new Date(event.recorded_at)
-    const day = date.getDay()
-    const hour = date.getHours()
-    heatmap[day].hours[hour].count++
-  }
+  // Use filtered events
+  for (const event of filteredEvents.value) {
+    const eventDate = new Date(event.recorded_at)
 
-  // Count door events per day/hour
-  for (const event of doorEvents.value) {
-    const date = new Date(event.recorded_at)
-    const day = date.getDay()
-    const hour = date.getHours()
-    heatmap[day].hours[hour].count++
+    for (const dayData of heatmap) {
+      const dayStart = dayData.date.getTime()
+      const dayEnd = dayStart + 24 * 60 * 60 * 1000
+
+      if (eventDate.getTime() >= dayStart && eventDate.getTime() < dayEnd) {
+        const hour = eventDate.getHours()
+        dayData.hours[hour].count++
+        dayData.hours[hour].events.push(event)
+        break
+      }
+    }
   }
 
   return heatmap
 })
 
-// Max count for heatmap color scaling
+// Heatmap modal
+const showHeatmapModal = ref(false)
+const selectedHeatmapCell = ref(null)
+
+const onHeatmapCellClick = (day, hourData) => {
+  if (hourData.count === 0) return
+
+  const byRoom = new Map()
+  for (const event of hourData.events) {
+    if (!byRoom.has(event.room)) {
+      byRoom.set(event.room, { motion: 0, light: 0, door: 0 })
+    }
+    byRoom.get(event.room)[event.source]++
+  }
+
+  selectedHeatmapCell.value = {
+    day: day.name,
+    date: day.dateStr,
+    hour: hourData.hour,
+    totalCount: hourData.count,
+    rooms: Array.from(byRoom.entries()).map(([room, counts]) => ({
+      room,
+      ...counts,
+      total: counts.motion + counts.light + counts.door
+    })).sort((a, b) => b.total - a.total)
+  }
+  showHeatmapModal.value = true
+}
+
 const maxHeatmapCount = computed(() => {
   let max = 1
   for (const day of weekHeatmap.value) {
@@ -253,7 +275,6 @@ const maxHeatmapCount = computed(() => {
   return max
 })
 
-// Get heatmap cell color
 const getHeatmapColor = (count) => {
   if (count === 0) return 'bg-gray-100'
   const intensity = count / maxHeatmapCount.value
@@ -263,74 +284,7 @@ const getHeatmapColor = (count) => {
   return 'bg-emerald-600'
 }
 
-// Today's activity count (excluding temperature)
-const todayStats = computed(() => {
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-
-  const motionCount = motionEvents.value.filter(e =>
-    e.motion && new Date(e.recorded_at) >= today
-  ).length
-
-  const doorCount = doorEvents.value.filter(e =>
-    new Date(e.recorded_at) >= today
-  ).length
-
-  return {
-    motion: motionCount,
-    door: doorCount,
-    total: motionCount + doorCount
-  }
-})
-
-// Last activity
-const lastActivity = computed(() => {
-  let latest = null
-  let location = '-'
-  let type = ''
-
-  for (const event of motionEvents.value) {
-    if (event.motion) {
-      const time = new Date(event.recorded_at)
-      if (!latest || time > latest) {
-        latest = time
-        location = event.room
-        type = 'motion'
-      }
-    }
-  }
-
-  for (const event of doorEvents.value) {
-    const time = new Date(event.recorded_at)
-    if (!latest || time > latest) {
-      latest = time
-      location = event.room
-      type = 'door'
-    }
-  }
-
-  return { time: latest, location, type }
-})
-
 // Format functions
-const formatTime = (timestamp) => {
-  if (!timestamp) return '-'
-  const date = new Date(timestamp)
-  return date.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' })
-}
-
-const formatDateTime = (timestamp) => {
-  if (!timestamp) return '-'
-  const date = new Date(timestamp)
-  return date.toLocaleString('nl-NL', {
-    day: '2-digit',
-    month: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit'
-  })
-}
-
 const formatTimeAgo = (timestamp) => {
   if (!timestamp) return '-'
   const diff = Date.now() - new Date(timestamp).getTime()
@@ -340,24 +294,36 @@ const formatTimeAgo = (timestamp) => {
   return `${Math.floor(diff / 86400000)} dagen geleden`
 }
 
-// Toggle sensor details
-const toggleSensor = (sensorId) => {
-  if (expandedSensor.value === sensorId) {
-    expandedSensor.value = null
-  } else {
-    expandedSensor.value = sensorId
-  }
+const formatDateTime = (timestamp) => {
+  if (!timestamp) return '-'
+  return new Date(timestamp).toLocaleString('nl-NL', {
+    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+  })
+}
+
+const getSourceIcon = (source) => {
+  if (source === 'motion') return Eye
+  if (source === 'light') return Lightbulb
+  if (source === 'door') return DoorOpen
+  return Activity
+}
+
+const getSourceColor = (source) => {
+  if (source === 'motion') return 'text-blue-600 bg-blue-100'
+  if (source === 'light') return 'text-yellow-600 bg-yellow-100'
+  if (source === 'door') return 'text-purple-600 bg-purple-100'
+  return 'text-gray-600 bg-gray-100'
 }
 
 // Auto refresh
 let refreshInterval
-onMounted(() => {
-  fetchData()
+onMounted(async () => {
+  await fetchData()
   refreshInterval = setInterval(fetchData, 30000)
 })
 
 onUnmounted(() => {
-  clearInterval(refreshInterval)
+  if (refreshInterval) clearInterval(refreshInterval)
 })
 </script>
 
@@ -367,54 +333,108 @@ onUnmounted(() => {
     <div class="flex items-center justify-between mb-8">
       <div>
         <h1 class="text-2xl font-bold text-gray-900">Dashboard</h1>
-        <p class="text-gray-500">Activiteit overzicht</p>
+        <p class="text-gray-500">Kamer activiteit</p>
       </div>
       <button
         @click="fetchData"
-        class="flex items-center gap-2 px-4 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+        class="flex items-center gap-2 px-4 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg"
       >
         <RefreshCw class="w-4 h-4" :class="{ 'animate-spin': loading }" />
         <span v-if="lastUpdate">{{ formatTimeAgo(lastUpdate) }}</span>
       </button>
     </div>
 
-    <!-- Status Cards -->
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-      <div class="bg-white rounded-xl border border-gray-200 p-6">
-        <div class="flex items-center gap-4">
-          <div class="w-12 h-12 rounded-xl bg-emerald-100 flex items-center justify-center">
-            <Activity class="w-6 h-6 text-emerald-600" />
+    <!-- Score Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+      <!-- Pattern Score -->
+      <button
+        @click="router.push('/patronen')"
+        class="bg-white rounded-xl border border-gray-200 p-6 text-left hover:border-emerald-300 hover:shadow-md transition-all"
+      >
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-4">
+            <div
+              class="w-14 h-14 rounded-xl flex items-center justify-center"
+              :class="{
+                'bg-emerald-100': patternScore.level === 'ok',
+                'bg-yellow-100': patternScore.level === 'let_op',
+                'bg-orange-100': patternScore.level === 'zorg'
+              }"
+            >
+              <TrendingUp
+                class="w-7 h-7"
+                :class="{
+                  'text-emerald-600': patternScore.level === 'ok',
+                  'text-yellow-600': patternScore.level === 'let_op',
+                  'text-orange-600': patternScore.level === 'zorg'
+                }"
+              />
+            </div>
+            <div>
+              <p class="text-sm text-gray-500">Patroonscore</p>
+              <p class="text-lg font-semibold text-gray-900">{{ patternScore.label }}</p>
+            </div>
           </div>
-          <div>
-            <p class="text-3xl font-bold text-gray-900">{{ todayStats.total }}</p>
-            <p class="text-sm text-gray-500">Activiteiten vandaag</p>
+          <div class="text-right">
+            <p
+              class="text-4xl font-bold"
+              :class="{
+                'text-emerald-600': patternScore.level === 'ok',
+                'text-yellow-600': patternScore.level === 'let_op',
+                'text-orange-600': patternScore.level === 'zorg'
+              }"
+            >
+              {{ patternScore.score }}
+            </p>
+            <p class="text-xs text-gray-400">/ 100</p>
           </div>
         </div>
-      </div>
+      </button>
 
-      <div class="bg-white rounded-xl border border-gray-200 p-6">
-        <div class="flex items-center gap-4">
-          <div class="w-12 h-12 rounded-xl bg-blue-100 flex items-center justify-center">
-            <Eye class="w-6 h-6 text-blue-600" />
+      <!-- Sensor Score -->
+      <button
+        @click="router.push('/status')"
+        class="bg-white rounded-xl border border-gray-200 p-6 text-left hover:border-blue-300 hover:shadow-md transition-all"
+      >
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-4">
+            <div
+              class="w-14 h-14 rounded-xl flex items-center justify-center"
+              :class="{
+                'bg-emerald-100': sensorScore.level === 'ok',
+                'bg-yellow-100': sensorScore.level === 'let_op',
+                'bg-orange-100': sensorScore.level === 'zorg'
+              }"
+            >
+              <Wifi
+                class="w-7 h-7"
+                :class="{
+                  'text-emerald-600': sensorScore.level === 'ok',
+                  'text-yellow-600': sensorScore.level === 'let_op',
+                  'text-orange-600': sensorScore.level === 'zorg'
+                }"
+              />
+            </div>
+            <div>
+              <p class="text-sm text-gray-500">Sensorscore</p>
+              <p class="text-lg font-semibold text-gray-900">{{ sensorScore.healthy }}/{{ sensorScore.total }} actief</p>
+            </div>
           </div>
-          <div>
-            <p class="text-3xl font-bold text-gray-900">{{ todayStats.motion }}</p>
-            <p class="text-sm text-gray-500">Bewegingen</p>
+          <div class="text-right">
+            <p
+              class="text-4xl font-bold"
+              :class="{
+                'text-emerald-600': sensorScore.level === 'ok',
+                'text-yellow-600': sensorScore.level === 'let_op',
+                'text-orange-600': sensorScore.level === 'zorg'
+              }"
+            >
+              {{ sensorScore.score }}
+            </p>
+            <p class="text-xs text-gray-400">/ 100</p>
           </div>
         </div>
-      </div>
-
-      <div class="bg-white rounded-xl border border-gray-200 p-6">
-        <div class="flex items-center gap-4">
-          <div class="w-12 h-12 rounded-xl bg-purple-100 flex items-center justify-center">
-            <DoorOpen class="w-6 h-6 text-purple-600" />
-          </div>
-          <div>
-            <p class="text-3xl font-bold text-gray-900">{{ todayStats.door }}</p>
-            <p class="text-sm text-gray-500">Deur events</p>
-          </div>
-        </div>
-      </div>
+      </button>
     </div>
 
     <!-- Last Activity -->
@@ -426,7 +446,7 @@ onUnmounted(() => {
         <div>
           <p class="text-sm text-gray-500">Laatste activiteit</p>
           <p class="text-xl font-semibold text-gray-900">
-            {{ lastActivity.location }}
+            {{ lastActivity.room }}
             <span class="text-gray-400 font-normal">·</span>
             {{ formatTimeAgo(lastActivity.time) }}
           </p>
@@ -436,12 +456,50 @@ onUnmounted(() => {
 
     <!-- Week Heatmap -->
     <div class="bg-white rounded-xl border border-gray-200 p-6 mb-8">
-      <h2 class="text-lg font-semibold text-gray-900 mb-4">Activiteit per uur (afgelopen 7 dagen)</h2>
-      <p class="text-sm text-gray-500 mb-6">Drukte gebaseerd op beweging en deur sensoren</p>
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-lg font-semibold text-gray-900">Activiteit per uur</h2>
+          <p class="text-sm text-gray-500">Klik op een cel voor details</p>
+        </div>
+        <div class="relative">
+          <button
+            @click="showRoomFilter = !showRoomFilter"
+            class="flex items-center gap-2 px-3 py-2 text-sm border border-gray-200 rounded-lg hover:bg-gray-50"
+          >
+            <Filter class="w-4 h-4 text-gray-500" />
+            <span>{{ selectedRooms.length }}/{{ rooms.length }} kamers</span>
+          </button>
 
-      <!-- Hour labels -->
+          <!-- Room Filter Dropdown -->
+          <div
+            v-if="showRoomFilter"
+            class="absolute right-0 top-full mt-2 w-64 bg-white border border-gray-200 rounded-lg shadow-lg z-10"
+          >
+            <div class="p-3 border-b border-gray-100 flex justify-between">
+              <button @click="selectAllRooms" class="text-xs text-blue-600 hover:underline">Alles</button>
+              <button @click="deselectAllRooms" class="text-xs text-gray-500 hover:underline">Geen</button>
+            </div>
+            <div class="p-2 max-h-64 overflow-y-auto">
+              <label
+                v-for="room in rooms"
+                :key="room.id"
+                class="flex items-center gap-2 px-2 py-1.5 hover:bg-gray-50 rounded cursor-pointer"
+              >
+                <input
+                  type="checkbox"
+                  :checked="selectedRooms.includes(room.name)"
+                  @change="toggleRoomFilter(room.name)"
+                  class="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                />
+                <span class="text-sm text-gray-700">{{ room.name }}</span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="flex mb-2">
-        <div class="w-10"></div>
+        <div class="w-20"></div>
         <div class="flex-1 flex">
           <template v-for="hour in 24" :key="hour">
             <div class="flex-1 text-center text-xs text-gray-400" v-if="(hour - 1) % 3 === 0">
@@ -452,23 +510,28 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- Heatmap grid -->
       <div class="space-y-1">
-        <div v-for="day in weekHeatmap" :key="day.name" class="flex items-center gap-2">
-          <div class="w-8 text-sm text-gray-500 font-medium">{{ day.name }}</div>
+        <div v-for="day in weekHeatmap" :key="day.dateStr" class="flex items-center gap-2">
+          <div class="w-20 text-sm text-gray-500">
+            <span class="font-medium">{{ day.name }}</span>
+            <span class="text-gray-400 ml-1">{{ day.dateStr }}</span>
+          </div>
           <div class="flex-1 flex gap-0.5">
             <div
               v-for="hourData in day.hours"
               :key="hourData.hour"
-              class="flex-1 h-6 rounded-sm transition-colors cursor-default"
-              :class="getHeatmapColor(hourData.count)"
-              :title="`${day.name} ${hourData.hour}:00 - ${hourData.count} events`"
+              class="flex-1 h-6 rounded-sm transition-colors"
+              :class="[
+                getHeatmapColor(hourData.count),
+                hourData.count > 0 ? 'cursor-pointer hover:ring-2 hover:ring-primary hover:ring-offset-1' : ''
+              ]"
+              :title="`${day.name} ${hourData.hour}:00 - ${hourData.count} activiteiten`"
+              @click="onHeatmapCellClick(day, hourData)"
             />
           </div>
         </div>
       </div>
 
-      <!-- Legend -->
       <div class="flex items-center justify-end gap-2 mt-4 text-xs text-gray-500">
         <span>Minder</span>
         <div class="w-4 h-4 rounded-sm bg-gray-100"></div>
@@ -480,105 +543,60 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Sensors with measurements table -->
-    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
-      <div class="p-6 border-b border-gray-100">
-        <div class="flex items-center gap-2">
-          <Table class="w-5 h-5 text-gray-400" />
-          <h2 class="text-lg font-semibold text-gray-900">Sensoren & Metingen</h2>
-        </div>
-        <p class="text-sm text-gray-500 mt-1">Klik op een sensor om alle metingen te zien</p>
-      </div>
-
-      <div v-if="sensors.length === 0" class="p-12 text-center">
-        <Activity class="w-12 h-12 text-gray-300 mx-auto mb-4" />
-        <p class="text-gray-500">Geen sensor data gevonden</p>
-        <p class="text-sm text-gray-400 mt-1">Wachtend op data van Home Assistant...</p>
-      </div>
-
-      <div v-else class="divide-y divide-gray-100">
-        <div v-for="sensor in sensors" :key="sensor.id">
-          <!-- Sensor Header -->
-          <button
-            @click="toggleSensor(sensor.id)"
-            class="w-full px-6 py-4 flex items-center justify-between hover:bg-gray-50 transition-colors"
-          >
-            <div class="flex items-center gap-4">
-              <div
-                class="w-10 h-10 rounded-lg flex items-center justify-center"
-                :class="sensor.type === 'motion' ? 'bg-blue-100' : 'bg-purple-100'"
-              >
-                <component
-                  :is="sensor.icon"
-                  class="w-5 h-5"
-                  :class="sensor.type === 'motion' ? 'text-blue-600' : 'text-purple-600'"
-                />
-              </div>
-              <div class="text-left">
-                <p class="font-medium text-gray-900">{{ sensor.name }}</p>
+    <!-- Heatmap Modal -->
+    <Teleport to="body">
+      <div
+        v-if="showHeatmapModal && selectedHeatmapCell"
+        class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+        @click.self="showHeatmapModal = false"
+      >
+        <div class="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 overflow-hidden">
+          <div class="p-6 border-b border-gray-100">
+            <div class="flex items-center justify-between">
+              <div>
+                <h3 class="text-lg font-semibold text-gray-900">
+                  {{ selectedHeatmapCell.day }} {{ selectedHeatmapCell.date }}
+                </h3>
                 <p class="text-sm text-gray-500">
-                  {{ sensor.type === 'motion' ? 'Bewegingssensor' : 'Deursensor' }}
-                  · {{ sensor.events.length }} metingen
+                  {{ selectedHeatmapCell.hour }}:00 - {{ selectedHeatmapCell.hour + 1 }}:00
                 </p>
               </div>
-            </div>
-            <ChevronDown
-              v-if="expandedSensor !== sensor.id"
-              class="w-5 h-5 text-gray-400"
-            />
-            <ChevronUp
-              v-else
-              class="w-5 h-5 text-gray-400"
-            />
-          </button>
-
-          <!-- Sensor Measurements Table -->
-          <div
-            v-if="expandedSensor === sensor.id"
-            class="bg-gray-50 border-t border-gray-100"
-          >
-            <div class="max-h-96 overflow-y-auto">
-              <table class="w-full">
-                <thead class="bg-gray-100 sticky top-0">
-                  <tr>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Tijdstip
-                    </th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Duur
-                    </th>
-                  </tr>
-                </thead>
-                <tbody class="divide-y divide-gray-200 bg-white">
-                  <tr
-                    v-for="(event, index) in sensor.events.slice(0, 100)"
-                    :key="index"
-                    class="hover:bg-gray-50"
-                  >
-                    <td class="px-6 py-3 text-sm text-gray-600">
-                      {{ formatDateTime(event.timestamp) }}
-                    </td>
-                    <td class="px-6 py-3">
-                      <span
-                        class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
-                        :class="event.durationDisplay !== '-' ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-500'"
-                      >
-                        {{ event.durationDisplay }}
-                      </span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-              <div v-if="sensor.events.length > 100" class="px-6 py-3 text-sm text-gray-500 bg-gray-50 text-center">
-                Toont 100 van {{ sensor.events.length }} metingen
-              </div>
-              <div v-if="sensor.events.length === 0" class="px-6 py-8 text-sm text-gray-500 text-center">
-                Geen {{ sensor.type === 'motion' ? 'bewegingen' : 'openingen' }} gevonden
+              <div class="text-right">
+                <p class="text-2xl font-bold text-primary">{{ selectedHeatmapCell.totalCount }}</p>
+                <p class="text-xs text-gray-500">activiteiten</p>
               </div>
             </div>
           </div>
+          <div class="p-6 max-h-80 overflow-y-auto">
+            <div class="space-y-3">
+              <div
+                v-for="roomData in selectedHeatmapCell.rooms"
+                :key="roomData.room"
+                class="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
+              >
+                <span class="font-medium text-gray-900">{{ roomData.room }}</span>
+                <div class="flex items-center gap-3">
+                  <span v-if="roomData.motion > 0" class="flex items-center gap-1 text-sm text-blue-600">
+                    <Eye class="w-4 h-4" /> {{ roomData.motion }}
+                  </span>
+                  <span v-if="roomData.light > 0" class="flex items-center gap-1 text-sm text-yellow-600">
+                    <Lightbulb class="w-4 h-4" /> {{ roomData.light }}
+                  </span>
+                  <span v-if="roomData.door > 0" class="flex items-center gap-1 text-sm text-purple-600">
+                    <DoorOpen class="w-4 h-4" /> {{ roomData.door }}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="p-4 bg-gray-50 border-t border-gray-100">
+            <button @click="showHeatmapModal = false" class="w-full py-2 text-sm font-medium text-gray-600 hover:text-gray-900">
+              Sluiten
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </Teleport>
+
   </div>
 </template>
