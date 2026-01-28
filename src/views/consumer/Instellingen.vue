@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { supabase } from '@/services/supabase'
 import hueService from '@/services/hue'
+import measurementService from '@/services/measurementService'
 import Card from '@/components/ui/Card.vue'
 import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
@@ -264,22 +265,56 @@ async function syncHueRooms() {
       }
     }
 
-    // Sync room_events - koppel events aan room via de sensor's room_id
-    // GEEN nieuwe rooms aanmaken voor sensoren!
-    let eventsCreated = 0
+    // ============================================
+    // STAP 4: Sla ALLE measurements op (RAW data)
+    // ============================================
+    let measurementsCreated = 0
 
+    // Sensor measurements
     for (const sensor of hueData.sensors) {
-      // Zoek het item (sensor) dat we net hebben gesync'd
       const { data: sensorItem } = await supabase
         .from('items')
         .select('id, room_id')
         .eq('hue_unique_id', sensor.id)
         .maybeSingle()
 
-      // Alleen events aanmaken als de sensor aan een room gekoppeld is
+      if (sensorItem) {
+        const count = await measurementService.saveSensorMeasurements(sensor, sensorItem.id)
+        measurementsCreated += count
+      }
+    }
+
+    // Light measurements
+    for (const light of hueData.lights) {
+      const { data: lightItem } = await supabase
+        .from('items')
+        .select('id')
+        .eq('hue_unique_id', light.uniqueid)
+        .maybeSingle()
+
+      if (lightItem) {
+        const count = await measurementService.saveLightMeasurements(light, lightItem.id)
+        measurementsCreated += count
+      }
+    }
+
+    console.log(`[Instellingen] Created ${measurementsCreated} measurements`)
+
+    // ============================================
+    // STAP 5: Maak room_events van presence/contact changes
+    // ============================================
+    let eventsCreated = 0
+
+    for (const sensor of hueData.sensors) {
+      const { data: sensorItem } = await supabase
+        .from('items')
+        .select('id, room_id')
+        .eq('hue_unique_id', sensor.id)
+        .maybeSingle()
+
       if (sensorItem?.room_id) {
-        // Motion event
-        if (sensor.presenceUpdated) {
+        // Motion event (alleen als presence=true)
+        if (sensor.presence && sensor.presenceUpdated) {
           const { error: eventError } = await supabase
             .from('room_events')
             .insert({
@@ -304,6 +339,28 @@ async function syncHueRooms() {
       }
     }
 
+    // Light events (als een lamp aan gaat)
+    for (const light of hueData.lights) {
+      if (light.state?.on) {
+        const { data: lightItem } = await supabase
+          .from('items')
+          .select('id, room_id')
+          .eq('hue_unique_id', light.uniqueid)
+          .maybeSingle()
+
+        if (lightItem?.room_id) {
+          const { error: eventError } = await supabase
+            .from('room_events')
+            .insert({
+              room_id: lightItem.room_id,
+              source: 'light',
+              recorded_at: new Date().toISOString()
+            })
+          if (!eventError) eventsCreated++
+        }
+      }
+    }
+
     console.log(`[Instellingen] Created ${eventsCreated} room events`)
 
     await supabase
@@ -311,7 +368,7 @@ async function syncHueRooms() {
       .update({ last_sync_at: new Date().toISOString() })
       .eq('id', hueIntegration.value.id)
 
-    integrationSuccess.value = `Sync voltooid: ${hueData.rooms.length} kamers, ${hueData.sensors.length} sensoren, ${hueData.lights.length} lampen, ${eventsCreated} events`
+    integrationSuccess.value = `Sync voltooid: ${hueData.rooms.length} kamers, ${hueData.sensors.length} sensoren, ${hueData.lights.length} lampen, ${measurementsCreated} metingen, ${eventsCreated} events`
     await loadIntegrations()
   } catch (e) {
     console.error('[Instellingen] Sync error:', e)
