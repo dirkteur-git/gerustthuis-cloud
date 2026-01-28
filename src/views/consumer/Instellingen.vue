@@ -62,6 +62,7 @@ const integrationLoading = ref(true)
 const syncing = ref(false)
 const integrationError = ref('')
 const integrationSuccess = ref('')
+const syncSummary = ref(null)
 const showHueDetails = ref(false)
 const dbIntegrations = ref([])
 
@@ -142,6 +143,19 @@ async function syncHueRooms() {
   syncing.value = true
   integrationError.value = ''
   integrationSuccess.value = ''
+  syncSummary.value = null
+
+  // Start sync log
+  let syncLogId = null
+  try {
+    const { data: logData } = await supabase.rpc('start_sync_log', {
+      p_integration_id: hueIntegration.value.id,
+      p_sync_type: 'manual'
+    })
+    syncLogId = logData
+  } catch (e) {
+    console.warn('[Instellingen] Could not start sync log:', e)
+  }
 
   try {
     const config = hueIntegration.value.config
@@ -154,6 +168,12 @@ async function syncHueRooms() {
     }
 
     const hueData = await hueService.getFullConfig(accessToken, username)
+    console.log('[Instellingen] Hue data received:', {
+      rooms: hueData.rooms.length,
+      sensors: hueData.sensors.length,
+      lights: hueData.lights.length,
+      switches: hueData.switches?.length || 0
+    })
 
     const { data: profileData } = await supabase
       .from('profiles')
@@ -265,6 +285,31 @@ async function syncHueRooms() {
       }
     }
 
+    // Sync switches (dimmers, taps)
+    for (const sw of hueData.switches || []) {
+      const { data: existingItem } = await supabase
+        .from('items')
+        .select('id')
+        .eq('hue_unique_id', sw.id)
+        .maybeSingle()
+
+      if (existingItem) {
+        await supabase
+          .from('items')
+          .update({ name: sw.name, config: { switchType: sw.switchType, battery: sw.battery } })
+          .eq('id', existingItem.id)
+      } else {
+        await supabase.from('items').insert({
+          name: sw.name,
+          type: 'switch',
+          household_id: householdId,
+          integration_id: hueIntegration.value.id,
+          hue_unique_id: sw.id,
+          config: { switchType: sw.switchType, battery: sw.battery }
+        })
+      }
+    }
+
     // ============================================
     // STAP 4: Sla ALLE measurements op (RAW data)
     // ============================================
@@ -301,9 +346,12 @@ async function syncHueRooms() {
     console.log(`[Instellingen] Created ${measurementsCreated} measurements`)
 
     // ============================================
-    // STAP 5: Maak room_events van presence/contact changes
+    // STAP 5: Maak room_events van sensor/light activiteit
     // ============================================
     let eventsCreated = 0
+
+    console.log('[Instellingen] Creating room_events...')
+    console.log('[Instellingen] Sensors with presence data:', hueData.sensors.filter(s => s.presenceUpdated).length)
 
     for (const sensor of hueData.sensors) {
       const { data: sensorItem } = await supabase
@@ -313,8 +361,8 @@ async function syncHueRooms() {
         .maybeSingle()
 
       if (sensorItem?.room_id) {
-        // Motion event (alleen als presence=true)
-        if (sensor.presence && sensor.presenceUpdated) {
+        // Motion event - maak altijd als er presenceUpdated is (dit is laatste beweging timestamp)
+        if (sensor.presenceUpdated) {
           const { error: eventError } = await supabase
             .from('room_events')
             .insert({
@@ -322,7 +370,11 @@ async function syncHueRooms() {
               source: 'motion',
               recorded_at: sensor.presenceUpdated
             })
-          if (!eventError) eventsCreated++
+          if (eventError) {
+            console.error('[Instellingen] Error creating motion event:', eventError)
+          } else {
+            eventsCreated++
+          }
         }
 
         // Contact/door event
@@ -336,10 +388,14 @@ async function syncHueRooms() {
             })
           if (!eventError) eventsCreated++
         }
+      } else {
+        console.log('[Instellingen] Sensor without room_id:', sensor.name, sensor.id)
       }
     }
 
-    // Light events (als een lamp aan gaat)
+    // Light events (als een lamp aan staat)
+    console.log('[Instellingen] Lights that are ON:', hueData.lights.filter(l => l.state?.on).length)
+
     for (const light of hueData.lights) {
       if (light.state?.on) {
         const { data: lightItem } = await supabase
@@ -356,7 +412,11 @@ async function syncHueRooms() {
               source: 'light',
               recorded_at: new Date().toISOString()
             })
-          if (!eventError) eventsCreated++
+          if (eventError) {
+            console.error('[Instellingen] Error creating light event:', eventError)
+          } else {
+            eventsCreated++
+          }
         }
       }
     }
@@ -368,11 +428,55 @@ async function syncHueRooms() {
       .update({ last_sync_at: new Date().toISOString() })
       .eq('id', hueIntegration.value.id)
 
-    integrationSuccess.value = `Sync voltooid: ${hueData.rooms.length} kamers, ${hueData.sensors.length} sensoren, ${hueData.lights.length} lampen, ${measurementsCreated} metingen, ${eventsCreated} events`
+    // Samenvatting
+    const switchCount = hueData.switches?.length || 0
+    const contactCount = hueData.contactSensors?.length || 0
+    syncSummary.value = {
+      rooms: hueData.rooms.length,
+      sensors: hueData.sensors.length - contactCount, // Motion sensors (excl contact)
+      contacts: contactCount,
+      switches: switchCount,
+      lights: hueData.lights.length,
+      measurements: measurementsCreated,
+      events: eventsCreated
+    }
+    integrationSuccess.value = 'Sync voltooid!'
+
+    // Complete sync log
+    if (syncLogId) {
+      try {
+        await supabase.rpc('complete_sync_log', {
+          p_log_id: syncLogId,
+          p_status: 'success',
+          p_rooms: hueData.rooms.length,
+          p_sensors: hueData.sensors.length,
+          p_lights: hueData.lights.length,
+          p_switches: switchCount,
+          p_measurements: measurementsCreated,
+          p_events: eventsCreated
+        })
+      } catch (e) {
+        console.warn('[Instellingen] Could not complete sync log:', e)
+      }
+    }
+
     await loadIntegrations()
   } catch (e) {
     console.error('[Instellingen] Sync error:', e)
     integrationError.value = 'Sync mislukt: ' + e.message
+
+    // Log error to sync_log
+    if (syncLogId) {
+      try {
+        await supabase.rpc('complete_sync_log', {
+          p_log_id: syncLogId,
+          p_status: 'error',
+          p_error_message: e.message
+        })
+      } catch (logError) {
+        console.warn('[Instellingen] Could not log sync error:', logError)
+      }
+    }
   } finally {
     syncing.value = false
   }
@@ -502,9 +606,42 @@ const formatTimeAgo = (timestamp) => {
           <p class="text-red-700">{{ integrationError }}</p>
         </div>
 
-        <div v-if="integrationSuccess" class="mb-6 p-4 bg-green-50 border border-green-200 rounded-xl flex items-start gap-3">
-          <CheckCircle class="w-5 h-5 text-green-500 flex-shrink-0 mt-0.5" />
-          <p class="text-green-700">{{ integrationSuccess }}</p>
+        <div v-if="integrationSuccess" class="mb-6 p-4 bg-green-50 border border-green-200 rounded-xl">
+          <div class="flex items-start gap-3 mb-3">
+            <CheckCircle class="w-5 h-5 text-green-500 flex-shrink-0 mt-0.5" />
+            <p class="text-green-700 font-medium">{{ integrationSuccess }}</p>
+          </div>
+          <!-- Sync Summary -->
+          <div v-if="syncSummary" class="grid grid-cols-3 sm:grid-cols-4 gap-3 mt-3 pt-3 border-t border-green-200">
+            <div class="text-center">
+              <p class="text-2xl font-bold text-green-700">{{ syncSummary.rooms }}</p>
+              <p class="text-xs text-green-600">Kamers</p>
+            </div>
+            <div class="text-center">
+              <p class="text-2xl font-bold text-green-700">{{ syncSummary.sensors }}</p>
+              <p class="text-xs text-green-600">Sensoren</p>
+            </div>
+            <div class="text-center">
+              <p class="text-2xl font-bold text-green-700">{{ syncSummary.switches }}</p>
+              <p class="text-xs text-green-600">Schakelaars</p>
+            </div>
+            <div class="text-center">
+              <p class="text-2xl font-bold text-green-700">{{ syncSummary.lights }}</p>
+              <p class="text-xs text-green-600">Lampen</p>
+            </div>
+            <div v-if="syncSummary.contacts > 0" class="text-center">
+              <p class="text-2xl font-bold text-green-700">{{ syncSummary.contacts }}</p>
+              <p class="text-xs text-green-600">Deursensoren</p>
+            </div>
+            <div class="text-center">
+              <p class="text-2xl font-bold text-green-700">{{ syncSummary.measurements }}</p>
+              <p class="text-xs text-green-600">Metingen</p>
+            </div>
+            <div class="text-center">
+              <p class="text-2xl font-bold text-green-700">{{ syncSummary.events }}</p>
+              <p class="text-xs text-green-600">Events</p>
+            </div>
+          </div>
         </div>
 
         <!-- Loading -->

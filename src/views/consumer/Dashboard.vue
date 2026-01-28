@@ -5,7 +5,6 @@ import { supabase } from '@/services/supabase'
 import {
   RefreshCw,
   Activity,
-  Clock,
   Eye,
   DoorOpen,
   Lightbulb,
@@ -19,22 +18,13 @@ const router = useRouter()
 // Data
 const rooms = ref([])
 const events = ref([])
+const latestMeasurements = ref([])
+const sensors = ref([]) // Motion sensors for alive check
 const loading = ref(true)
 const lastUpdate = ref(null)
-const checkNuResult = ref(null)
 const selectedRooms = ref([])
 const showRoomFilter = ref(false)
-
-// Fetch check_nu for pattern score
-const fetchCheckNu = async () => {
-  try {
-    const { data, error } = await supabase.rpc('check_nu')
-    if (error) throw error
-    checkNuResult.value = data
-  } catch (error) {
-    console.error('Error fetching check_nu:', error)
-  }
-}
+const showSensorModal = ref(false)
 
 // Fetch data from Supabase
 const fetchData = async () => {
@@ -80,16 +70,102 @@ const fetchData = async () => {
     }
 
     // Add room name to events
+    console.log('[Dashboard] Raw events from DB:', allEvents.length)
+    console.log('[Dashboard] Sample raw event:', allEvents[0])
+    console.log('[Dashboard] Room map keys:', [...roomMap.keys()])
+
     events.value = allEvents.map(e => ({
       ...e,
       room: roomMap.get(e.room_id) || 'Onbekend'
     }))
 
-    lastUpdate.value = new Date()
-    console.log(`[Dashboard] Loaded ${rooms.value.length} rooms, ${events.value.length} events`)
+    console.log('[Dashboard] Events with room names:', events.value.slice(0, 3))
 
-    // Also fetch check_nu
-    await fetchCheckNu()
+    // Fetch latest measurements (simple query first)
+    const { data: measurementsData, error: measError, count: measCount } = await supabase
+      .from('measurements')
+      .select('*', { count: 'exact' })
+      .order('recorded_at', { ascending: false })
+      .limit(20)
+
+    console.log('[Dashboard] Measurements query result:', { data: measurementsData?.length, error: measError, totalCount: measCount })
+
+    if (measError) {
+      console.error('[Dashboard] Error fetching measurements:', measError)
+    } else if (measurementsData && measurementsData.length > 0) {
+      // Get item details separately
+      const itemIds = [...new Set(measurementsData.map(m => m.item_id))]
+      const { data: itemsData } = await supabase
+        .from('items')
+        .select('id, name, type, room_id')
+        .in('id', itemIds)
+
+      const itemMap = new Map(itemsData?.map(i => [i.id, i]) || [])
+
+      latestMeasurements.value = measurementsData.map(m => {
+        const item = itemMap.get(m.item_id)
+        return {
+          ...m,
+          itemName: item?.name || 'Onbekend item',
+          itemType: item?.type || 'unknown',
+          roomName: roomMap.get(item?.room_id) || '-'
+        }
+      })
+      console.log('[Dashboard] Latest measurements:', latestMeasurements.value.slice(0, 5))
+    } else {
+      console.log('[Dashboard] No measurements found in database')
+      latestMeasurements.value = []
+    }
+
+    // Fetch sensors with their latest measurement
+    const { data: sensorsData } = await supabase
+      .from('items')
+      .select('id, name, room_id, type')
+      .eq('type', 'sensor')
+
+    if (sensorsData && sensorsData.length > 0) {
+      const sensorIds = sensorsData.map(s => s.id)
+      const hourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+
+      // Alive check: use temperature/presence/contact (polled every minute)
+      // This is the reliable alive indicator for all sensor types
+      const { data: aliveChecks } = await supabase
+        .from('measurements')
+        .select('item_id, capability, recorded_at')
+        .in('item_id', sensorIds)
+        .in('capability', ['temperature', 'presence', 'contact'])
+        .gte('recorded_at', hourAgo)
+        .order('recorded_at', { ascending: false })
+
+      // Check if sensor has contact capability (to determine sensor type)
+      const { data: contactChecks } = await supabase
+        .from('measurements')
+        .select('item_id')
+        .in('item_id', sensorIds)
+        .eq('capability', 'contact')
+        .limit(100)
+
+      const sensorsWithContact = new Set(contactChecks?.map(m => m.item_id) || [])
+      const sensorsWithAliveCheck = new Set(aliveChecks?.map(m => m.item_id) || [])
+
+      // Determine alive status per sensor
+      sensors.value = sensorsData.map(s => {
+        const isContactSensor = sensorsWithContact.has(s.id)
+        const alive = sensorsWithAliveCheck.has(s.id)
+
+        return {
+          ...s,
+          roomName: roomMap.get(s.room_id) || '-',
+          alive,
+          sensorType: isContactSensor ? 'contact' : 'motion'
+        }
+      })
+
+      console.log('[Dashboard] Sensors:', sensors.value.length, 'alive:', sensors.value.filter(s => s.alive).length)
+    }
+
+    lastUpdate.value = new Date()
+    console.log(`[Dashboard] Loaded ${rooms.value.length} rooms, ${events.value.length} events, ${sensors.value.length} sensors`)
   } catch (error) {
     console.error('Error fetching data:', error)
   } finally {
@@ -112,51 +188,23 @@ const todayStats = computed(() => {
   }
 })
 
-// Pattern score computed from check_nu
+// Pattern score - placeholder until check_nu is implemented
 const patternScore = computed(() => {
-  if (!checkNuResult.value) return { score: 100, level: 'ok', label: 'Normaal' }
-
-  const maxZ = checkNuResult.value.max_z_score || 0
-  const score = Math.max(0, Math.round(100 - (maxZ * 33)))
-
-  let level = 'ok'
-  let label = 'Normaal'
-  if (score < 70) { level = 'let_op'; label = 'Let op' }
-  if (score < 40) { level = 'zorg'; label = 'Aandacht' }
-
-  return { score, level, label }
+  return { score: 100, level: 'ok', label: 'Normaal' }
 })
 
-// Sensor score - based on alive check (last event within 90 minutes per room)
+// Sensor score - based on alive check (measurement within 60 minutes per sensor)
 const sensorScore = computed(() => {
-  const now = new Date()
-  const aliveThreshold = 90 * 60 * 1000 // 90 minuten in milliseconden
-
-  // Check per kamer of er recent een event is geweest
-  const roomStatus = rooms.value.map(room => {
-    const roomEvents = events.value.filter(e => e.room === room.name)
-    if (roomEvents.length === 0) return { room: room.name, alive: false }
-
-    const lastEvent = new Date(roomEvents[0].recorded_at) // events zijn gesorteerd op tijd (nieuwste eerst)
-    const timeSinceLastEvent = now.getTime() - lastEvent.getTime()
-
-    return {
-      room: room.name,
-      alive: timeSinceLastEvent <= aliveThreshold,
-      lastEvent
-    }
-  })
-
-  const totalRooms = rooms.value.length
-  const healthyCount = roomStatus.filter(r => r.alive).length
-  const score = totalRooms > 0 ? Math.round((healthyCount / totalRooms) * 100) : 100
+  const totalSensors = sensors.value.length
+  const aliveSensors = sensors.value.filter(s => s.alive).length
+  const score = totalSensors > 0 ? Math.round((aliveSensors / totalSensors) * 100) : 100
 
   return {
     score,
-    healthy: healthyCount,
-    total: totalRooms,
+    healthy: aliveSensors,
+    total: totalSensors,
     level: score >= 80 ? 'ok' : score >= 50 ? 'let_op' : 'zorg',
-    roomStatus // voor debugging/details
+    sensors: sensors.value // voor debugging/details
   }
 })
 
@@ -183,18 +231,6 @@ const filteredEvents = computed(() => {
   if (selectedRooms.value.length === 0) return []
   return events.value.filter(e => selectedRooms.value.includes(e.room))
 })
-
-// Last activity
-const lastActivity = computed(() => {
-  if (events.value.length === 0) return { time: null, room: '-', source: '' }
-  const last = events.value[0]
-  return {
-    time: new Date(last.recorded_at),
-    room: last.room,
-    source: last.source
-  }
-})
-
 
 // Week heatmap - uses filtered events
 const weekHeatmap = computed(() => {
@@ -393,7 +429,7 @@ onUnmounted(() => {
 
       <!-- Sensor Score -->
       <button
-        @click="router.push('/status')"
+        @click="showSensorModal = true"
         class="bg-white rounded-xl border border-gray-200 p-6 text-left hover:border-blue-300 hover:shadow-md transition-all"
       >
         <div class="flex items-center justify-between">
@@ -435,23 +471,6 @@ onUnmounted(() => {
           </div>
         </div>
       </button>
-    </div>
-
-    <!-- Last Activity -->
-    <div class="bg-white rounded-xl border border-gray-200 p-6 mb-8">
-      <div class="flex items-center gap-4">
-        <div class="w-14 h-14 rounded-xl bg-gray-100 flex items-center justify-center">
-          <Clock class="w-7 h-7 text-gray-600" />
-        </div>
-        <div>
-          <p class="text-sm text-gray-500">Laatste activiteit</p>
-          <p class="text-xl font-semibold text-gray-900">
-            {{ lastActivity.room }}
-            <span class="text-gray-400 font-normal">·</span>
-            {{ formatTimeAgo(lastActivity.time) }}
-          </p>
-        </div>
-      </div>
     </div>
 
     <!-- Week Heatmap -->
@@ -591,6 +610,66 @@ onUnmounted(() => {
           </div>
           <div class="p-4 bg-gray-50 border-t border-gray-100">
             <button @click="showHeatmapModal = false" class="w-full py-2 text-sm font-medium text-gray-600 hover:text-gray-900">
+              Sluiten
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- Sensor Status Modal -->
+    <Teleport to="body">
+      <div
+        v-if="showSensorModal"
+        class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+        @click.self="showSensorModal = false"
+      >
+        <div class="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 overflow-hidden">
+          <div class="p-6 border-b border-gray-100">
+            <div class="flex items-center justify-between">
+              <div>
+                <h3 class="text-lg font-semibold text-gray-900">Sensor Status</h3>
+                <p class="text-sm text-gray-500">Activiteit in laatste uur</p>
+              </div>
+              <div class="text-right">
+                <p class="text-2xl font-bold" :class="{
+                  'text-emerald-600': sensorScore.level === 'ok',
+                  'text-yellow-600': sensorScore.level === 'let_op',
+                  'text-orange-600': sensorScore.level === 'zorg'
+                }">{{ sensorScore.healthy }}/{{ sensorScore.total }}</p>
+                <p class="text-xs text-gray-500">actief</p>
+              </div>
+            </div>
+          </div>
+          <div class="p-6 max-h-80 overflow-y-auto">
+            <div class="space-y-2">
+              <div
+                v-for="sensor in sensorScore.sensors"
+                :key="sensor.id"
+                class="flex items-center justify-between p-3 rounded-lg"
+                :class="sensor.alive ? 'bg-emerald-50' : 'bg-red-50'"
+              >
+                <div class="flex items-center gap-3">
+                  <div
+                    class="w-3 h-3 rounded-full"
+                    :class="sensor.alive ? 'bg-emerald-500' : 'bg-red-500'"
+                  ></div>
+                  <div>
+                    <p class="font-medium text-gray-900">{{ sensor.name }}</p>
+                    <p class="text-xs text-gray-500">{{ sensor.roomName }} · {{ sensor.sensorType === 'contact' ? 'Deur' : 'Motion' }}</p>
+                  </div>
+                </div>
+                <span
+                  class="text-sm font-medium"
+                  :class="sensor.alive ? 'text-emerald-600' : 'text-red-600'"
+                >
+                  {{ sensor.alive ? 'Actief' : 'Inactief' }}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div class="p-4 bg-gray-50 border-t border-gray-100">
+            <button @click="showSensorModal = false" class="w-full py-2 text-sm font-medium text-gray-600 hover:text-gray-900">
               Sluiten
             </button>
           </div>

@@ -97,17 +97,22 @@ export async function saveSensorMeasurements(sensor, itemId) {
 
   // Insert alle metingen
   if (measurements.length > 0) {
+    console.log('[MeasurementService] Saving sensor measurements:', { itemId, count: measurements.length, capabilities: measurements.map(m => m.capability) })
+
     const { error } = await supabase
       .from('measurements')
       .insert(measurements)
 
     if (error) {
       console.error('[MeasurementService] Error saving sensor measurements:', error)
+      console.error('[MeasurementService] Measurements that failed:', measurements)
       return 0
     }
+    console.log('[MeasurementService] Successfully saved', measurements.length, 'measurements')
     return measurements.length
   }
 
+  console.log('[MeasurementService] No measurements to save for sensor', { sensor })
   return 0
 }
 

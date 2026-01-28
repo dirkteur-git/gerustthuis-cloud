@@ -387,14 +387,41 @@ export async function getLights(accessToken, username) {
 }
 
 /**
- * Get full bridge configuration with rooms, sensors, lights, and contact sensors
+ * Get switches (buttons/dimmers) from bridge
+ */
+export async function getSwitches(accessToken, username) {
+  const sensors = await getSensors(accessToken, username)
+  const switches = []
+
+  for (const [id, sensor] of Object.entries(sensors)) {
+    // ZLLSwitch = Hue Dimmer Switch, ZGPSwitch = Hue Tap
+    if (sensor.type === 'ZLLSwitch' || sensor.type === 'ZGPSwitch') {
+      switches.push({
+        id: sensor.uniqueid?.split('-')[0] || id,
+        name: sensor.name,
+        type: 'switch',
+        switchType: sensor.type === 'ZLLSwitch' ? 'dimmer' : 'tap',
+        lastButtonEvent: sensor.state?.buttonevent,
+        lastUpdated: sensor.state?.lastupdated,
+        battery: sensor.config?.battery,
+        reachable: sensor.config?.reachable
+      })
+    }
+  }
+
+  return switches
+}
+
+/**
+ * Get full bridge configuration with rooms, sensors, lights, switches and contact sensors
  */
 export async function getFullConfig(accessToken, username) {
   // Fetch v1 and v2 API data in parallel
-  const [rooms, sensors, lights, contactSensors] = await Promise.all([
+  const [rooms, sensors, lights, switches, contactSensors] = await Promise.all([
     getRooms(accessToken, username),
     getAllSensorStates(accessToken, username),
     getLights(accessToken, username),
+    getSwitches(accessToken, username),
     getContactSensors(accessToken, username).catch(err => {
       console.warn('[Hue] Could not fetch contact sensors:', err)
       return []
@@ -422,6 +449,7 @@ export async function getFullConfig(accessToken, username) {
     rooms,
     sensors: allSensors,
     lights,
+    switches,
     contactSensors // Also expose separately for easy access
   }
 }
@@ -442,6 +470,7 @@ export default {
   getMotionSensors,
   getAllSensorStates,
   getContactSensors,
+  getSwitches,
   getAllDevicesV2,
   getRooms,
   getLights,

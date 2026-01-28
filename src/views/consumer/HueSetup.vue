@@ -29,6 +29,34 @@ const hueConnection = ref(null)
 const sensors = ref([])
 const syncingData = ref(false)
 
+// Trigger hue-poller to run alive check (battery/reachable) for all sensors
+async function triggerAliveCheck() {
+  try {
+    console.log('[HueSetup] Triggering alive check via hue-poller...')
+    const { data: { session } } = await supabase.auth.getSession()
+    const token = session?.access_token
+
+    const response = await fetch(
+      `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/hue-poller`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token || import.meta.env.VITE_SUPABASE_ANON_KEY}`
+        },
+        body: JSON.stringify({})
+      }
+    )
+
+    const result = await response.json()
+    console.log('[HueSetup] Alive check result:', result)
+    return result
+  } catch (e) {
+    console.error('[HueSetup] Alive check failed:', e)
+    return null
+  }
+}
+
 // Check if already connected
 onMounted(async () => {
   console.log('[HueSetup] onMounted starting...')
@@ -162,6 +190,10 @@ onMounted(async () => {
           }
           success.value = 'Hue Bridge succesvol gekoppeld!'
           step.value = 3
+
+          // Trigger alive check to get initial battery/reachable data
+          await triggerAliveCheck()
+
           await loadSensors()
         }
 
@@ -297,6 +329,9 @@ async function handleOAuthCallback(code) {
 
     success.value = 'Hue Bridge succesvol gekoppeld!'
     step.value = 3
+
+    // Trigger alive check to get initial battery/reachable data
+    await triggerAliveCheck()
 
     // Load sensors
     await loadSensors()
